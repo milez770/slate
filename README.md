@@ -2,6 +2,10 @@
 
 개인용 iOS 웹 브라우저. 광고·팝업·전면 오버레이를 3층(콘텐츠 규칙 목록·팝업 거부·오버레이 제거 스크립트)으로 차단하고, 자격 증명 저장은 iOS 시스템 키체인 자동완성에 맡긴다.
 
+| 브라우징 | 탭 격자 | 방문 기록 타임라인 | 페이지 내 찾기 | 설정 |
+|---|---|---|---|---|
+| ![브라우징](Screenshots/browse.png) | ![탭 격자](Screenshots/tabs.png) | ![타임라인](Screenshots/timeline.png) | ![찾기](Screenshots/find.png) | ![설정](Screenshots/settings.png) |
+
 ## 빌드
 
 1. `brew install xcodegen`
