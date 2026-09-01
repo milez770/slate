@@ -156,6 +156,9 @@ struct BrowserView: View {
                 .onGeometryChange(for: CGRect.self, of: { $0.frame(in: .global) }) { webFrame = $0 }
             allWebViews
                 .overlay { loadErrorView }
+                // 배경색은 마스크 안에 있어야 한다 — 밖에 두면 격자를 열었을 때 접힌 페이지
+                // 대신 배경색이 화면 전체를 덮어 격자가 안 보인다.
+                .background(Color(uiColor: tab.pageBackground).ignoresSafeArea())
                 .modifier(pageZoom)
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
@@ -164,7 +167,6 @@ struct BrowserView: View {
                 .animation(.spring(response: 0.32, dampingFraction: 0.86), value: addressFocused)
                 .opacity(store.zoomProgress)
         }
-        .background(Color(uiColor: tab.pageBackground).ignoresSafeArea())
     }
 
     /// 전체 탭의 웹뷰 더미. 활성 탭만 보이고 만질 수 있다.
@@ -475,6 +477,7 @@ struct BrowserView: View {
             .barSurface(Capsule())
             .contentShape(Capsule())
             .onTapGesture { tab.chromeCollapsed = false }
+            .accessibilityIdentifier("collapsedBar")
             .padding(.bottom, 6)
     }
 
