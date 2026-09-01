@@ -1,0 +1,48 @@
+name: Slate
+options:
+  deploymentTarget:
+    iOS: "18.0"
+packages:
+  SafariConverterLib:
+    url: https://github.com/AdguardTeam/SafariConverterLib
+    majorVersion: 4.0.0
+targets:
+  Slate:
+    type: application
+    platform: iOS
+    sources: [Slate]
+    dependencies:
+      - package: SafariConverterLib
+        product: ContentBlockerConverter
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.wonseon.slate
+        TARGETED_DEVICE_FAMILY: "1"
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: Slate/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Slate/Slate.entitlements
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+  SlateTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources: [SlateTests]
+    dependencies:
+      - target: Slate
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+  SlateUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [SlateUITests]
+    dependencies:
+      - target: Slate
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+schemes:
+  Slate:
+    build:
+      targets: { Slate: all }
+    test:
+      targets: [SlateTests, SlateUITests]

@@ -1,0 +1,61 @@
+# 사전 조건: 배포 환경 변수 주입 — FASTLANE_TEAM_ID, APP_STORE_CONNECT_API_KEY_PATH, MATCH_GIT_URL, MATCH_PASSWORD.
+#
+#   bundle exec fastlane ios certs   — 최초 1회, 인증서·프로파일 생성
+#   bundle exec fastlane ios beta    — TestFlight 빌드·업로드
+
+default_platform(:ios)
+
+PROJECT = "./Slate.xcodeproj".freeze
+SCHEME  = "Slate".freeze
+BUNDLE_ID = "com.wonseon.slate".freeze
+
+platform :ios do
+  before_all do
+    UI.user_error!("배포 환경 변수 미주입 (MATCH_GIT_URL 없음)") unless ENV["MATCH_GIT_URL"]
+    sh("cd .. && xcodegen generate")
+  end
+
+  desc "최초 1회: App Store 배포 인증서·프로비저닝 프로파일 생성 (slate-certs에 저장)"
+  lane :certs do
+    match(type: "appstore", readonly: false)
+  end
+
+  desc "TestFlight 빌드·업로드"
+  lane :beta do
+    match(type: "appstore", readonly: true)
+
+    update_code_signing_settings(
+      use_automatic_signing: false,
+      path: PROJECT,
+      team_id: ENV["FASTLANE_TEAM_ID"],
+      code_sign_identity: "Apple Distribution",
+      profile_name: ENV["sigh_#{BUNDLE_ID}_appstore_profile-name"],
+      targets: [SCHEME]
+    )
+
+    # Info.plist의 CFBundleVersion이 리터럴이라 빌드마다 시각으로 덮는다.
+    # xcodegen 재생성 대상이 아니므로 업로드 후 git으로 되돌린다 (ensure).
+    set_info_plist_value(
+      path: "./Slate/Info.plist",
+      key: "CFBundleVersion",
+      value: Time.now.strftime("%Y%m%d.%H%M")
+    )
+
+    build_app(
+      project: PROJECT,
+      scheme: SCHEME,
+      export_method: "app-store",
+      output_directory: "./fastlane/build",
+      output_name: "Slate.ipa",
+      clean: true
+    )
+
+    upload_to_testflight(
+      api_key_path: ENV["APP_STORE_CONNECT_API_KEY_PATH"],
+      skip_waiting_for_build_processing: true,
+      uses_non_exempt_encryption: false
+    )
+  ensure
+    sh("cd .. && git checkout -- Slate/Info.plist")
+  end
+end

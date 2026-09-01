@@ -1,0 +1,7 @@
+# 인증서 저장소는 MATCH_GIT_URL 환경 변수로 지정한다
+
+git_url ENV["MATCH_GIT_URL"] if ENV["MATCH_GIT_URL"]
+storage_mode "git"
+type "appstore"
+app_identifier(["com.wonseon.slate"])
+username ENV["FASTLANE_USER"] if ENV["FASTLANE_USER"]

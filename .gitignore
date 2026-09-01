@@ -1,0 +1,11 @@
+Slate.xcodeproj/
+DerivedData/
+.DS_Store
+fastlane/build/
+fastlane/report.xml
+fastlane/README.md
+.superpowers/
+
+# 로컬 젬 설치 경로
+vendor/bundle/
+.bundle/

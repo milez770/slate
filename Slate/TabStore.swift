@@ -1,0 +1,458 @@
+import Foundation
+import Observation
+import SwiftUI
+import WebKit
+
+@MainActor
+@Observable
+final class TabStore {
+    private static let stateKey = "slate.tab.urls"
+    private static let idsKey = "slate.tab.ids"
+    private static let activeKey = "slate.tab.active"
+    private static let bannerSweepKey = "slate.banner.sweep"
+    private static let autoTranslateKey = "slate.translate.auto"
+    private static let closedKey = "slate.tab.closed"
+    private static let closedIDsKey = "slate.tab.closed.ids"
+    private static let stickyIDsKey = "slate.tab.sticky"
+    private static let stickyParentsKey = "slate.tab.sticky.parents"
+    private static let closedStickyKey = "slate.tab.closed.sticky"
+    private static let closedParentsKey = "slate.tab.closed.parents"
+    private static let closedLimit = 10
+    private let defaults: UserDefaults
+    /// 방문 기록 원장. 탭 ID로 타임라인 카드와 살아있는 탭을 잇는다.
+    let history: HistoryStore
+    var tabs: [Tab] = []
+    var activeTab: Tab?
+    /// 최근에 닫은 탭. 앱이 살아 있는 동안은 뒤로가기 이력(interactionState)까지 갖고,
+    /// 재시작 뒤에는 주소만 남는다. tabID는 방문 기록의 카드와 잇는 열쇠다.
+    struct ClosedTab {
+        let url: URL
+        let state: Data?
+        let tabID: UUID
+        /// 붙박이였나·어느 붙박이에서 갈라졌었나. 되살릴 때 그룹 자리로 돌아가게 한다.
+        var sticky = false
+        var stickyParentID: UUID?
+    }
+    private(set) var closedTabs: [ClosedTab] = []
+    var showingGrid = false
+    /// 페이지의 펼침 정도. 1이 화면 전체, 0이 격자의 활성 탭 카드 크기. 이 값 하나만
+    /// 애니메이션되고, 배율·마스크·카드 장식이 전부 이 값의 1차식이라 같은 트랜잭션의
+    /// 기본 보간만으로 매 틱 맞물린다.
+    var zoomProgress: Double = 1
+
+    /// 탭 격자를 연다. 격자를 먼저 보이게만 하고(펼쳐진 페이지가 덮고 있어 안 보인다),
+    /// 접기는 ContentView가 활성 탭 카드의 자리를 확보한 뒤 beginCollapse()로 시작한다 —
+    /// 자리 없이 접으면 원점이나 화면 밖으로 날아간다.
+    func openGrid() {
+        // 떠 있는 웹페이지 알림창을 취소로 닫는다. 그대로 두면 격자 위에 남는다.
+        tabs.forEach { $0.coordinator.dismissPanels() }
+        // 지금 보던 화면을 카드에 담는다 — 로드 완료 뒤 스크롤한 만큼은 아직 안 찍혀 있다.
+        activeTab?.captureSnapshot()
+        showingGrid = true
+        pendingCollapse = true
+    }
+
+    /// openGrid() 후 접기 대기 상태. 카드 자리가 잡히는 쪽이 소비한다.
+    private(set) var pendingCollapse = false
+
+    /// 활성 탭 카드 자리가 잡혔다 — 다음 틱에 접기를 애니메이션한다. 한 번만 발동.
+    func beginCollapse() {
+        guard pendingCollapse else { return }
+        pendingCollapse = false
+        Task { @MainActor in
+            withAnimation(.tabSwitch) { self.zoomProgress = 0 }
+        }
+    }
+
+    /// 자리가 끝내 안 잡히면(카드 배치 실패) 애니메이션 없이 접는다.
+    func collapseInstantly() {
+        guard pendingCollapse, showingGrid else { return }
+        pendingCollapse = false
+        zoomProgress = 0
+    }
+
+    /// 격자에서 카드를 골랐다. 탭 교체(웹뷰·목표 카드 프레임)는 애니메이션 없이 먼저 끝낸다
+    /// — 접힌 페이지가 이전 카드 자리에서 고른 카드 자리로 즉시 옮겨 가는데, 두 자리 모두
+    /// 밑에 같은 그림의 실제 카드가 있어 점프가 보이지 않는다. 그다음 틱에 펼침만
+    /// 애니메이션한다. 한 트랜잭션에 섞으면 마스크 크기 같은 파생값이 두 출처(카드 프레임
+    /// 점프 + 진행률 보간)에서 동시에 바뀌어 시작 위치가 이전 카드로 어긋난다.
+    func pick(_ tab: Tab) {
+        pendingCollapse = false
+        activate(tab)
+        Task { @MainActor in
+            withAnimation(.tabSwitch, completionCriteria: .logicallyComplete) {
+                self.zoomProgress = 1
+            } completion: {
+                // 펼침이 끝날 때까지 격자를 밑에 남긴다 — 확대되는 페이지가 덮는다.
+                self.showingGrid = false
+            }
+        }
+    }
+
+    /// 격자에서 새 탭. 새 탭은 자라날 카드가 격자에 없으므로 애니메이션 없이 바로 연다.
+    func newTabFromGrid() {
+        newTab()
+        pendingCollapse = false
+        zoomProgress = 1
+        showingGrid = false
+    }
+    var ruleLists: [WKContentRuleList] = []
+
+    var bannerSweepEnabled: Bool {
+        didSet {
+            defaults.set(bannerSweepEnabled, forKey: Self.bannerSweepKey)
+            reloadUserScripts()
+        }
+    }
+
+    /// 일본어 글자를 한국어로 바꾼다. 기본 켜짐.
+    var autoTranslateEnabled: Bool {
+        didSet {
+            defaults.set(autoTranslateEnabled, forKey: Self.autoTranslateKey)
+            reloadUserScripts()
+        }
+    }
+
+    /// 탭별 뒤로가기 이력(interactionState) 파일이 사는 폴더. UserDefaults에 넣기엔 커서
+    /// 파일로 둔다. 파일 이름은 탭 ID.
+    private let stateDirectory: URL
+
+    init(defaults: UserDefaults = .standard, history: HistoryStore? = nil, stateDirectory: URL? = nil) {
+        self.defaults = defaults
+        self.history = history ?? .shared
+        self.stateDirectory = stateDirectory
+            ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("TabState", isDirectory: true)
+        if defaults.object(forKey: Self.bannerSweepKey) == nil {
+            bannerSweepEnabled = true
+        } else {
+            bannerSweepEnabled = defaults.bool(forKey: Self.bannerSweepKey)
+        }
+        if defaults.object(forKey: Self.autoTranslateKey) == nil {
+            autoTranslateEnabled = true
+        } else {
+            autoTranslateEnabled = defaults.bool(forKey: Self.autoTranslateKey)
+        }
+    }
+
+    /// 모든 탭에 얹을 스크립트 목록. 스위치 상태에 따라 달라진다.
+    private func userScripts() -> [WKUserScript] {
+        var scripts = [
+            UserScripts.script(named: "popup-guard", injectionTime: .atDocumentStart, forMainFrameOnly: false),
+            UserScripts.script(named: "sticky-detour", injectionTime: .atDocumentStart, forMainFrameOnly: true),
+            UserScripts.script(named: "ad-cloak", injectionTime: .atDocumentStart, forMainFrameOnly: false),
+            UserScripts.script(named: "rule-applier", injectionTime: .atDocumentStart, forMainFrameOnly: false),
+            UserScripts.script(named: "overlay-buster", injectionTime: .atDocumentEnd, forMainFrameOnly: false),
+            UserScripts.script(named: "area-picker", injectionTime: .atDocumentEnd, forMainFrameOnly: true),
+            UserScripts.script(named: "find-in-page", injectionTime: .atDocumentEnd, forMainFrameOnly: true)
+        ]
+        if bannerSweepEnabled {
+            scripts.append(UserScripts.script(named: "banner-sweeper", injectionTime: .atDocumentEnd, forMainFrameOnly: false))
+        }
+        if autoTranslateEnabled {
+            scripts.append(UserScripts.script(named: "auto-translate", injectionTime: .atDocumentEnd, forMainFrameOnly: false))
+        }
+        return scripts
+    }
+
+    func reloadUserScripts() {
+        for tab in tabs {
+            let controller = tab.webView.configuration.userContentController
+            controller.removeAllUserScripts()
+            userScripts().forEach { controller.addUserScript($0) }
+        }
+    }
+
+    func newTab(id: UUID = UUID()) {
+        let tab = Tab(id: id, configuration: Self.makeConfiguration())
+        userScripts().forEach { tab.webView.configuration.userContentController.addUserScript($0) }
+        ruleLists.forEach { tab.webView.configuration.userContentController.add($0) }
+        let base = tab.coordinator.onCommit
+        tab.coordinator.onCommit = { [weak self, weak tab] url in
+            base?(url)
+            if let tab { self?.history.record(url: url, tabID: tab.id) }
+            self?.saveState()
+        }
+        // SPA 이동은 didCommit이 안 뜬다 — 로드 없는 주소 변화로 찍는다.
+        tab.onURLChange = { [weak self, weak tab] url in
+            guard let tab else { return }
+            self?.history.record(url: url, tabID: tab.id)
+            // SPA에는 로드 완료 신호가 없다. 새 화면이 그려질 틈을 준 뒤 찍는다.
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(700))
+                tab.captureSnapshot()
+            }
+        }
+        // 찍은 그림은 지금 방문에 붙어 디스크로 간다 — 탭이 죽어도 카드에 그림이 남는다.
+        tab.onSnapshot = { [weak self, weak tab] image in
+            guard let self, let tab, let visit = self.history.lastVisit(tabID: tab.id) else { return }
+            SnapshotStore.shared.store(image, for: visit.id)
+        }
+        tab.onTitleChange = { [weak self, weak tab] title, url in
+            guard let tab else { return }
+            self?.history.updateTitle(title, url: url, tabID: tab.id)
+        }
+        tab.coordinator.onOpenInNewTab = { [weak self, weak tab] url in
+            guard let tab else { return }
+            self?.openLinkInNewTab(url, from: tab)
+        }
+        tabs.append(tab)
+        activeTab = tab
+    }
+
+    /// 링크 롱탭 "새 탭에서 열기". 새 탭으로 전환하고, 방문 기록에는 원래 탭의 마지막
+    /// 방문을 부모로 이어 가지를 만든다.
+    func openLinkInNewTab(_ url: URL, from sourceTab: Tab) {
+        let parent = history.lastVisit(tabID: sourceTab.id)
+        newTab()
+        guard let tab = activeTab else { return }
+        if let parent { history.setParent(parent.id, forNextVisitIn: tab.id) }
+        // 붙박이에서 갈라진 탭은 격자에서 그 붙박이 그룹에 묶인다.
+        if sourceTab.sticky { tab.stickyParentID = sourceTab.id }
+        tab.webView.load(URLRequest(url: url))
+    }
+
+    func prepareFilters() async {
+        ruleLists = await FilterManager.shared.loadRuleLists()
+        for tab in tabs {
+            let controller = tab.webView.configuration.userContentController
+            controller.removeAllContentRuleLists()
+            ruleLists.forEach { controller.add($0) }
+        }
+    }
+
+    func close(_ tab: Tab) {
+        if let url = tab.webView.url ?? tab.lastURL {
+            closedTabs.append(ClosedTab(url: url, state: tab.webView.interactionState as? Data, tabID: tab.id,
+                                        sticky: tab.sticky, stickyParentID: tab.stickyParentID))
+            if closedTabs.count > Self.closedLimit { closedTabs.removeFirst(closedTabs.count - Self.closedLimit) }
+        }
+        tabs.removeAll { $0 === tab }
+        if tabs.isEmpty { newTab() }
+        if activeTab === tab, let last = tabs.last {
+            activate(last)
+        }
+        saveState()
+    }
+
+    /// 마지막으로 닫은 탭을 새 탭으로 되살린다. 이력이 남아 있으면 이력째, 없으면 주소만.
+    func reopenClosedTab() {
+        guard let closed = closedTabs.last else { return }
+        reopen(closed)
+    }
+
+    /// 닫은 탭 하나를 골라 되살린다. 새 탭은 새 ID로 시작하고, 방문 기록에서는 옛 카드의
+    /// 마지막 방문을 부모로 이어 붙는다 — 옛 카드는 과거 기록으로 남는다.
+    func reopen(_ closed: ClosedTab) {
+        guard let index = closedTabs.lastIndex(where: { $0.tabID == closed.tabID && $0.url == closed.url }) else { return }
+        closedTabs.remove(at: index)
+        newTab()
+        guard let tab = activeTab else { return }
+        if let parent = history.lastVisit(tabID: closed.tabID) {
+            history.setParent(parent.id, forNextVisitIn: tab.id)
+        }
+        tab.lastURL = closed.url
+        tab.sticky = closed.sticky
+        tab.stickyParentID = closed.stickyParentID
+        if let state = closed.state {
+            tab.webView.interactionState = state
+        } else {
+            tab.webView.load(URLRequest(url: closed.url))
+        }
+        saveState()
+    }
+
+    func reopenClosedTabFromGrid() {
+        reopenClosedTab()
+        pendingCollapse = false
+        zoomProgress = 1
+        showingGrid = false
+    }
+
+
+    func activate(_ tab: Tab) {
+        activeTab = tab
+        guard tab.webView.url == nil else { return }
+        if let state = tab.pendingInteractionState {
+            tab.pendingInteractionState = nil
+            tab.webView.interactionState = state
+            // 못 쓰는 상태값(WebKit 판 차이·파일 손상)이면 웹뷰가 조용히 무시한다 —
+            // 이력 복원이 안 걸렸으면 주소라도 연다.
+            if tab.webView.backForwardList.currentItem == nil, let url = tab.lastURL {
+                tab.webView.load(URLRequest(url: url))
+            }
+        } else if let url = tab.lastURL {
+            tab.webView.load(URLRequest(url: url))
+        }
+    }
+
+    func saveState() {
+        // 주소가 없는 탭은 저장 목록에서 빠진다 — tabs 기준 인덱스를 쓰면 복원 때 어긋나므로
+        // 저장되는 목록 안에서의 자리를 센다.
+        let saved = tabs.filter { $0.lastURL != nil }
+        defaults.set(saved.compactMap { $0.lastURL?.absoluteString }, forKey: Self.stateKey)
+        // 탭 ID를 주소와 나란히 저장한다 — 재시작 후에도 방문 기록 카드가 산 탭에 붙는다.
+        defaults.set(saved.map { $0.id.uuidString }, forKey: Self.idsKey)
+        let index = saved.firstIndex { $0 === activeTab } ?? max(saved.count - 1, 0)
+        defaults.set(index, forKey: Self.activeKey)
+        defaults.set(tabs.filter(\.sticky).map { $0.id.uuidString }, forKey: Self.stickyIDsKey)
+        // 자식 → 붙박이 부모. "자식ID:부모ID" 짝으로 저장한다.
+        defaults.set(tabs.compactMap { tab in tab.stickyParentID.map { "\(tab.id.uuidString):\($0.uuidString)" } },
+                     forKey: Self.stickyParentsKey)
+        defaults.set(closedTabs.map { $0.url.absoluteString }, forKey: Self.closedKey)
+        defaults.set(closedTabs.map { $0.tabID.uuidString }, forKey: Self.closedIDsKey)
+        defaults.set(closedTabs.map { $0.sticky ? "1" : "0" }, forKey: Self.closedStickyKey)
+        defaults.set(closedTabs.map { $0.stickyParentID?.uuidString ?? "" }, forKey: Self.closedParentsKey)
+    }
+
+    /// 백그라운드로 빠질 때 부른다. 탭마다 뒤로가기 이력(interactionState)을 파일로 남긴다 —
+    /// 여기 저장돼야 iOS가 앱을 죽여도 재시작 때 이력째 돌아온다. 없어진 탭의 파일은 지운다.
+    func saveInteractionStates() {
+        let fm = FileManager.default
+        try? fm.createDirectory(at: stateDirectory, withIntermediateDirectories: true)
+        var kept: Set<String> = []
+        for tab in tabs {
+            // 복원 뒤 아직 화면에 안 붙은 탭은 웹뷰가 비어 있다 — 읽어 둔 이력을 그대로 다시 쓴다.
+            let data = tab.pendingInteractionState
+                ?? (tab.webView.url != nil ? tab.webView.interactionState as? Data : nil)
+            guard let data else { continue }
+            try? data.write(to: stateDirectory.appendingPathComponent(tab.id.uuidString), options: .atomic)
+            kept.insert(tab.id.uuidString)
+        }
+        for name in (try? fm.contentsOfDirectory(atPath: stateDirectory.path)) ?? [] where !kept.contains(name) {
+            try? fm.removeItem(at: stateDirectory.appendingPathComponent(name))
+        }
+    }
+
+    func restoreState() {
+        let closedURLs = (defaults.stringArray(forKey: Self.closedKey) ?? []).compactMap(URL.init(string:))
+        let closedIDs = (defaults.stringArray(forKey: Self.closedIDsKey) ?? []).compactMap(UUID.init(uuidString:))
+        let closedSticky = defaults.stringArray(forKey: Self.closedStickyKey) ?? []
+        let closedParents = defaults.stringArray(forKey: Self.closedParentsKey) ?? []
+        closedTabs = closedURLs.enumerated().map { offset, url in
+            ClosedTab(url: url, state: nil,
+                      tabID: closedIDs.indices.contains(offset) ? closedIDs[offset] : UUID(),
+                      sticky: closedSticky.indices.contains(offset) && closedSticky[offset] == "1",
+                      stickyParentID: closedParents.indices.contains(offset)
+                          ? UUID(uuidString: closedParents[offset]) : nil)
+        }
+        let urls = (defaults.stringArray(forKey: Self.stateKey) ?? []).compactMap(URL.init(string:))
+        let ids = (defaults.stringArray(forKey: Self.idsKey) ?? []).compactMap(UUID.init(uuidString:))
+        for (offset, url) in urls.enumerated() {
+            // 옛 저장본에는 ID가 없다 — 짝이 안 맞으면 새 ID로 연다.
+            newTab(id: ids.indices.contains(offset) ? ids[offset] : UUID())
+            activeTab?.lastURL = url
+            // 백그라운드 때 저장해 둔 뒤로가기 이력. activate가 소비한다.
+            if let tab = activeTab {
+                tab.pendingInteractionState =
+                    try? Data(contentsOf: stateDirectory.appendingPathComponent(tab.id.uuidString))
+            }
+        }
+        if tabs.isEmpty { newTab() }
+        let stickyIDs = Set((defaults.stringArray(forKey: Self.stickyIDsKey) ?? []).compactMap(UUID.init(uuidString:)))
+        for tab in tabs where stickyIDs.contains(tab.id) { tab.sticky = true }
+        var parents: [UUID: UUID] = [:]
+        for pair in defaults.stringArray(forKey: Self.stickyParentsKey) ?? [] {
+            let pieces = pair.split(separator: ":").map(String.init)
+            if pieces.count == 2, let child = UUID(uuidString: pieces[0]), let parent = UUID(uuidString: pieces[1]) {
+                parents[child] = parent
+            }
+        }
+        for tab in tabs { tab.stickyParentID = parents[tab.id] }
+        // newTab()이 매번 activeTab을 덮으므로 루프가 끝난 뒤 저장된 자리로 되돌린다.
+        // 로드는 하지 않는다 — 화면에 붙을 때 ContentView가 activate()로 연다.
+        let index = defaults.integer(forKey: Self.activeKey)
+        activeTab = tabs.indices.contains(index) ? tabs[index] : tabs[tabs.count - 1]
+        SnapshotStore.shared.prune(keeping: Set(history.visits.map(\.id)))
+    }
+
+    // MARK: - 타임라인
+
+    /// 타임라인 카드가 업는 탭의 현재 상태. 저장하지 않고 볼 때마다 판정한다 — 탭은 계속
+    /// 죽고 살아나므로 저장하면 어긋난다.
+    enum TabStatus {
+        case current      // 지금 보고 있는 탭
+        case open         // 열려 있는 다른 탭
+        case restorable   // 닫혔지만 되살릴 수 있는 탭
+        case gone         // 기록만 남은 탭
+    }
+
+    func status(ofTabID id: UUID) -> TabStatus {
+        if activeTab?.id == id { return .current }
+        if tabs.contains(where: { $0.id == id }) { return .open }
+        if closedTabs.contains(where: { $0.tabID == id }) { return .restorable }
+        return .gone
+    }
+
+    func tab(withID id: UUID) -> Tab? {
+        tabs.first { $0.id == id }
+    }
+
+    /// 격자에서 카드를 끌어다 놓았다. 끌던 카드를 놓은 자리에 넣고 나머지를 민다.
+    /// 배열 순서가 곧 저장 순서라 옮기고 저장하면 재시작 뒤에도 유지된다.
+    func move(tabID: UUID, onto targetID: UUID) {
+        guard tabID != targetID,
+              let from = tabs.firstIndex(where: { $0.id == tabID }),
+              let to = tabs.firstIndex(where: { $0.id == targetID }) else { return }
+        let moving = tabs.remove(at: from)
+        // 오른쪽으로 옮기면 제거 때문에 대상 자리가 하나 당겨져 to가 곧 '대상 뒤'가 되고,
+        // 왼쪽으로 옮기면 대상 자리가 그대로라 to가 곧 '대상 앞'이다.
+        tabs.insert(moving, at: min(to, tabs.count))
+        saveState()
+    }
+
+    /// 탭 카드가 보여줄 그림의 열쇠. 그림은 탭이 아니라 방문에 붙어 있으므로 그 탭의
+    /// 마지막 방문을 찾는다 — 재시작해서 탭 객체가 비어 있어도 그림이 나온다.
+    func snapshotID(forTabID id: UUID) -> UUID? {
+        history.lastVisit(tabID: id)?.id
+    }
+
+    /// 타임라인 카드 머리를 눌렀다. 산 탭이면 전환, 되살릴 수 있으면 통째 복원, 기록만이면
+    /// 마지막 페이지를 새 탭으로.
+    func openRun(_ run: HistoryRun) {
+        switch status(ofTabID: run.tabID) {
+        case .current:
+            break
+        case .open:
+            if let tab = tab(withID: run.tabID) { activate(tab) }
+        case .restorable:
+            if let closed = closedTabs.last(where: { $0.tabID == run.tabID }) { reopen(closed) }
+        case .gone:
+            openInNewTab(run.last)
+        }
+    }
+
+    /// 타임라인에서 방문 하나를 눌렀다. 산 탭이면 전환하고, 그 주소가 뒤로가기 목록에 있으면
+    /// 그 지점으로 이동한다 — 산 탭에 그냥 로드하면 앞쪽 이력이 잘린다. 목록에 없거나 죽은
+    /// 탭이면 새 탭으로 연다.
+    func openVisit(_ visit: Visit) {
+        guard let tab = tab(withID: visit.tabID) else {
+            openInNewTab(visit)
+            return
+        }
+        activate(tab)
+        let target = HistoryStore.stripFragment(visit.url)
+        if let current = tab.webView.url, HistoryStore.stripFragment(current) == target { return }
+        let list = tab.webView.backForwardList
+        let items = list.backList + [list.currentItem].compactMap { $0 } + list.forwardList
+        if let item = items.last(where: { HistoryStore.stripFragment($0.url) == target }) {
+            tab.webView.go(to: item)
+        } else {
+            openInNewTab(visit)
+        }
+    }
+
+    /// 방문 주소를 새 탭으로 연다. 새 탭의 첫 기록은 그 방문을 부모로 이어 붙는다.
+    private func openInNewTab(_ visit: Visit) {
+        newTab()
+        guard let tab = activeTab else { return }
+        history.setParent(visit.id, forNextVisitIn: tab.id)
+        tab.webView.load(URLRequest(url: visit.url))
+    }
+
+    static func makeConfiguration() -> WKWebViewConfiguration {
+        let configuration = WKWebViewConfiguration()
+        configuration.allowsInlineMediaPlayback = true
+        return configuration
+    }
+}
