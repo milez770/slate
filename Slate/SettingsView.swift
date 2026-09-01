@@ -1,4 +1,5 @@
 import SwiftUI
+import WebKit
 
 struct SettingsView: View {
     let store: TabStore
@@ -7,6 +8,11 @@ struct SettingsView: View {
     @State private var message: String?
     @State private var lastUpdated: Date?
     @State private var syncEnabled = CloudSync.shared.isEnabled
+    @State private var cookieRules = CookieRuleStore.shared
+    @State private var newCookieDomain = ""
+    @State private var newCookieName = ""
+    @State private var newCookieValue = ""
+    @State private var newCookieDays = "365"
 
     var body: some View {
         Form {
@@ -74,6 +80,51 @@ struct SettingsView: View {
                 }
                 .disabled(refreshing || resetting)
                 if let message { Text(message).font(.caption).foregroundStyle(.secondary) }
+            }
+            Section("쿠키 규칙") {
+                Text("지정한 도메인에 쿠키를 미리 심는다. 해외에서 지역·연령 확인으로 막히는 사이트를, 그 확인을 통과하면 심어지는 쿠키를 직접 넣어 여는 데 쓴다. 앱을 켤 때 첫 로드 전에 심는다.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                ForEach(cookieRules.rules) { rule in
+                    HStack(spacing: 12) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("\(rule.name)=\(rule.value)")
+                                .font(.system(.footnote, design: .monospaced))
+                                .lineLimit(1)
+                            Text("\(rule.domain) · \(rule.expiresDays)일")
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button("삭제", role: .destructive) { cookieRules.remove(rule) }
+                            .buttonStyle(.borderless)
+                    }
+                }
+                VStack(spacing: 6) {
+                    TextField("도메인 (예: .example.co.jp)", text: $newCookieDomain)
+                        .autocorrectionDisabled().textInputAutocapitalization(.never)
+                    TextField("쿠키 이름", text: $newCookieName)
+                        .autocorrectionDisabled().textInputAutocapitalization(.never)
+                    TextField("값", text: $newCookieValue)
+                        .autocorrectionDisabled().textInputAutocapitalization(.never)
+                    TextField("만료 (일)", text: $newCookieDays)
+                        .keyboardType(.numberPad)
+                }
+                .font(.system(.footnote, design: .monospaced))
+                Button("규칙 추가") {
+                    let domain = newCookieDomain.trimmingCharacters(in: .whitespaces)
+                    let name = newCookieName.trimmingCharacters(in: .whitespaces)
+                    guard !domain.isEmpty, !name.isEmpty else { return }
+                    let rule = CookieRule(domain: domain, name: name, value: newCookieValue,
+                                          expiresDays: Int(newCookieDays) ?? 365)
+                    cookieRules.add(rule)
+                    Task {
+                        // 재시작 안 해도 지금 심는다.
+                        await cookieRules.inject(into: WKWebsiteDataStore.default().httpCookieStore)
+                    }
+                    newCookieDomain = ""; newCookieName = ""; newCookieValue = ""; newCookieDays = "365"
+                }
+                .disabled(newCookieDomain.trimmingCharacters(in: .whitespaces).isEmpty
+                          || newCookieName.trimmingCharacters(in: .whitespaces).isEmpty)
             }
             Section("직접 지운 광고") {
                 if SiteRuleStore.shared.hosts.isEmpty {

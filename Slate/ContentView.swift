@@ -41,6 +41,8 @@ struct ContentView: View {
             // 로그인 풀린 화면이 먼저 뜨지 않는다.
             let cookieStore = WKWebsiteDataStore.default().httpCookieStore
             await SessionCookieStore.shared.restore(into: cookieStore)
+            // 사용자 쿠키 규칙을 첫 로드 전에 심는다 — 지역·연령 확인 관문을 미리 통과시킨다.
+            await CookieRuleStore.shared.inject(into: cookieStore)
             SessionCookieStore.shared.attach(to: cookieStore)
             store.restoreState()
             CloudSync.shared.start()
