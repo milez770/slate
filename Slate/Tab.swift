@@ -49,6 +49,10 @@ final class Tab: Identifiable {
     }
     /// 지금 이 탭에 얹힌 광고 차단 방식. TabStore가 이동 직전에 사이트 설정과 맞춘다.
     @ObservationIgnored var appliedBlockingMode: BlockingMode = .full
+    /// 절전 상태. 메모리가 모자랄 때 안 보는 탭의 페이지를 내리고 뒤로가기 이력만
+    /// pendingInteractionState에 들고 있다. 다시 고르면 TabStore가 되살린다. 절전 중에는
+    /// 웹뷰가 빈 페이지를 물고 있으므로 주소·그림을 갱신하지 않는다.
+    var hibernated = false
     /// 페이지가 실제로 칠하는 배경색. 상태바 뒤를 이 색으로 메워 콘텐츠와 이어 보이게 한다.
     var pageBackground: UIColor = .systemBackground
     /// 로드 실패 사유. nil이 아니면 화면에 오류를 띄운다.
@@ -56,6 +60,11 @@ final class Tab: Identifiable {
     /// 실패의 오류 도메인·코드·실패 주소. 오류 화면 아래에 작게 띄운다 — 사유 문장만으로는
     /// 차단기·네트워크·WebKit 중 어디서 난 실패인지 알 수 없다.
     var loadErrorDetail: String?
+    /// 콘텐츠 차단기가 막은 이동의 주소. 페이지가 떠 있으면 오류 화면 대신 띠로 알리고 몇 초 뒤
+    /// 지운다. 빈 탭이면 오류 화면에 "차단 없이 열기"를 붙이는 근거가 된다.
+    var blockedURL: URL?
+    /// 다음 로드 한 번은 규칙 목록 없이 간다. 커밋되면 TabStore가 규칙을 다시 걸고 끈다.
+    @ObservationIgnored var bypassBlockerForNextLoad = false
 
     /// 로드 없이 주소가 바뀔 때(SPA의 pushState — didCommit이 안 뜬다) 알린다.
     /// 로딩 중의 주소 변화는 didCommit이 맡으므로 여기서는 거른다.
@@ -93,7 +102,7 @@ final class Tab: Identifiable {
         webView.configuration.userContentController.add(coordinator, name: "slateStickyOpen")
         webView.configuration.userContentController.add(coordinator, name: "slateTranslate")
         coordinator.onCommit = { [weak self] url in
-            guard let self else { return }
+            guard let self, !self.hibernated else { return }
             self.lastURL = url
             self.canGoBack = self.webView.canGoBack
             self.canGoForward = self.webView.canGoForward
@@ -122,14 +131,26 @@ final class Tab: Identifiable {
             self?.failedURL = nil
         }
         coordinator.onFail = { [weak self] error in
+            guard let self else { return }
             let error = error as NSError
             let failed = error.userInfo[NSURLErrorFailingURLErrorKey] as? URL
-            self?.failedURL = failed
+            // 차단기가 막은 이동인데 뒤에 페이지가 떠 있으면 실패가 아니다 — 페이지는 그대로 두고
+            // 띠로만 알린다. WebKit은 실패를 알리기 전에 url을 원래 페이지로 되돌려 둔다.
+            if BrowserCoordinator.isBlockedByContentBlocker(error), let failed, self.webView.url != nil {
+                self.blockedURL = failed
+                Task { @MainActor [weak self] in
+                    try? await Task.sleep(for: .seconds(6))
+                    if self?.blockedURL == failed { self?.blockedURL = nil }
+                }
+                return
+            }
+            self.blockedURL = BrowserCoordinator.isBlockedByContentBlocker(error) ? failed : nil
+            self.failedURL = failed
             // 실패한 주소를 주소창에 남긴다 — 커밋이 안 됐으므로 lastURL이 비어 있고,
             // 그대로 두면 주소창이 빈 채라 주소를 고쳐 다시 시도할 수가 없다.
-            if let failed { self?.lastURL = failed }
-            self?.loadError = error.localizedDescription
-            self?.loadErrorDetail = ["\(error.domain) \(error.code)", failed?.absoluteString]
+            if let failed { self.lastURL = failed }
+            self.loadError = error.localizedDescription
+            self.loadErrorDetail = ["\(error.domain) \(error.code)", failed?.absoluteString]
                 .compactMap { $0 }.joined(separator: " · ")
         }
 
@@ -154,11 +175,11 @@ final class Tab: Identifiable {
                 Task { @MainActor in
                     // 로드가 실패하거나 웹 프로세스가 죽으면 url이 nil로 떨어진다. 그대로 받으면
                     // 주소창이 비어 주소를 고쳐 다시 시도할 수가 없다 — nil은 무시한다.
-                    guard let url = webView.url else { return }
-                    self?.lastURL = url
+                    guard let self, !self.hibernated, let url = webView.url else { return }
+                    self.lastURL = url
                     // 로딩 중이면 일반 로드(제공·리다이렉트 주소 포함)라 didCommit이 처리한다.
                     // 로딩이 아닌데 주소가 바뀌었으면 SPA 이동이다.
-                    if !webView.isLoading { self?.onURLChange?(url) }
+                    if !webView.isLoading { self.onURLChange?(url) }
                 }
             },
             webView.observe(\.title, options: [.new]) { [weak self] webView, _ in
@@ -218,6 +239,7 @@ final class Tab: Identifiable {
     /// 지금 보이는 화면을 찍는다. 로드 완료 때 자동으로 부르고, 격자를 열 때도 한 번 더
     /// 부른다 — 스크롤·SPA 이동으로 화면이 달라졌어도 카드가 마지막 모습을 담게.
     func captureSnapshot() {
+        guard !hibernated else { return }   // 빈 페이지를 찍어 카드 그림을 덮으면 안 된다
         let configuration = WKSnapshotConfiguration()
         configuration.snapshotWidth = NSNumber(value: Double(Self.snapshotWidth))
         webView.takeSnapshot(with: configuration) { [weak self] image, _ in

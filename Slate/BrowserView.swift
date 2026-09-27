@@ -126,6 +126,7 @@ struct BrowserView: View {
                 .ignoresSafeArea(edges: .bottom)
                 .background(Color(uiColor: tab.pageBackground).ignoresSafeArea(edges: .top))
                 .overlay { loadErrorView }
+                .overlay(alignment: .bottom) { blockedBanner.animation(.spring(response: 0.3), value: tab.blockedURL) }
                 .modifier(pageZoom)
             bottomBar()
                 // 바 접힘·주소 포커스의 스프링은 바에만 건다. 뷰 전체에 걸면 탭을 바꿀 때
@@ -156,6 +157,7 @@ struct BrowserView: View {
                 .onGeometryChange(for: CGRect.self, of: { $0.frame(in: .global) }) { webFrame = $0 }
             allWebViews
                 .overlay { loadErrorView }
+                .overlay(alignment: .bottom) { blockedBanner.animation(.spring(response: 0.3), value: tab.blockedURL) }
                 // 배경색은 마스크 안에 있어야 한다 — 밖에 두면 격자를 열었을 때 접힌 페이지
                 // 대신 배경색이 화면 전체를 덮어 격자가 안 보인다.
                 .background(Color(uiColor: tab.pageBackground).ignoresSafeArea())
@@ -169,12 +171,12 @@ struct BrowserView: View {
         }
     }
 
-    /// 전체 탭의 웹뷰 더미. 활성 탭만 보이고 만질 수 있다.
+    /// 전체 탭의 웹뷰 더미. 활성 탭만 보이고 만질 수 있다. 나머지는 UIKit hidden — 계층에는
+    /// 남아 스크롤 위치를 지키되 WebKit에는 안 보이는 페이지로 잡혀 메모리를 놓는다.
     private var allWebViews: some View {
         ZStack {
             ForEach(store.tabs) { t in
-                WebView(webView: t.webView)
-                    .opacity(t === tab ? 1 : 0)
+                WebView(webView: t.webView, isActive: t === tab)
                     .allowsHitTesting(t === tab)
             }
         }
@@ -249,20 +251,59 @@ struct BrowserView: View {
                         .multilineTextAlignment(.center)
                         .textSelection(.enabled)
                 }
-                Button { tab.retryLoad() } label: {
-                    Text("다시 시도")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.black)
-                        .padding(.horizontal, 18)
-                        .padding(.vertical, 10)
-                        .background(brandGreen, in: Capsule())
+                HStack(spacing: 10) {
+                    Button { tab.retryLoad() } label: {
+                        Text("다시 시도")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.black)
+                            .padding(.horizontal, 18)
+                            .padding(.vertical, 10)
+                            .background(brandGreen, in: Capsule())
+                    }
+                    .accessibilityIdentifier("retryLoadButton")
+                    // 차단기가 막은 첫 로드. 정말 가려던 페이지면 이 한 번은 규칙 없이 연다.
+                    if let blocked = tab.blockedURL {
+                        Button { store.loadBypassingBlocker(blocked, in: tab) } label: {
+                            Text("차단 없이 열기")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(.primary)
+                                .padding(.horizontal, 18)
+                                .padding(.vertical, 10)
+                                .background(Color(.systemGray5), in: Capsule())
+                        }
+                        .accessibilityIdentifier("bypassBlockerButton")
+                    }
                 }
                 .padding(.top, 4)
-                .accessibilityIdentifier("retryLoadButton")
             }
             .padding(32)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color(uiColor: .systemBackground))
+        }
+    }
+
+    /// 차단기가 막은 이동을 알리는 띠. 페이지는 그대로 있으므로 덮지 않고 바 위에 잠깐 뜬다.
+    /// 정말 가려던 주소면 "열기"로 이 한 번만 규칙 없이 간다.
+    @ViewBuilder
+    private var blockedBanner: some View {
+        if let blocked = tab.blockedURL, tab.loadError == nil {
+            HStack(spacing: 10) {
+                Image(systemName: "shield.slash")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Text("막은 이동 · \(blocked.host ?? blocked.absoluteString)")
+                    .font(.footnote)
+                    .lineLimit(1)
+                Button("열기") { store.loadBypassingBlocker(blocked, in: tab) }
+                    .font(.footnote.weight(.semibold))
+                    .buttonStyle(.borderless)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 9)
+            .barSurface(Capsule())
+            .padding(.bottom, barHeight + homeIndicatorInset + 10)
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+            .accessibilityIdentifier("blockedBanner")
         }
     }
 

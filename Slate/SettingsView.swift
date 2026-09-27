@@ -1,5 +1,6 @@
 import SwiftUI
 import WebKit
+import os
 
 struct SettingsView: View {
     let store: TabStore
@@ -23,6 +24,9 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Text("방문 \(store.history.visits.count)개 · history.json \(ByteCountFormatter.string(fromByteCount: Int64(store.history.fileSize), countStyle: .file))")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Text("탭 \(store.tabs.count)개(살아 있는 페이지 \(store.liveTabCount)) · 앱이 더 쓸 수 있는 메모리 \(ByteCountFormatter.string(fromByteCount: Int64(os_proc_available_memory()), countStyle: .memory))")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }

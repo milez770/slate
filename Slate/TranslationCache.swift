@@ -12,6 +12,8 @@ final class TranslationCache {
     private let url: URL
     private var map: [String: String] = [:]
     private var saveTask: Task<Void, Never>?
+    private var generation = 0
+    private let writer = JSONFileWriter()
 
     init(url: URL? = nil) {
         self.url = url ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -41,15 +43,18 @@ final class TranslationCache {
         scheduleSave()
     }
 
+    /// 변경을 2초 모아 배경에서 쓴다. 원장 전체를 메인 스레드에서 인코딩하지 않는다.
     private func scheduleSave() {
+        generation += 1
         saveTask?.cancel()
         saveTask = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .seconds(2))
-            guard !Task.isCancelled else { return }
-            self?.save()
+            guard !Task.isCancelled, let self else { return }
+            await self.writer.write(self.map, generation: self.generation, to: self.url)
         }
     }
 
+    /// 지금 바로 쓴다. 시험과 백그라운드 진입용.
     func save() {
         do {
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)

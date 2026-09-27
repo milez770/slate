@@ -141,6 +141,41 @@ final class TabStore {
         } else {
             autoTranslateEnabled = defaults.bool(forKey: Self.autoTranslateKey)
         }
+        memoryWarningObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.didReceiveMemoryWarningNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.relieveMemoryPressure() }
+        }
+    }
+
+    deinit {
+        if let memoryWarningObserver { NotificationCenter.default.removeObserver(memoryWarningObserver) }
+    }
+
+    @ObservationIgnored private var memoryWarningObserver: NSObjectProtocol?
+
+    // MARK: - 메모리
+
+    /// 절전 안 된 탭 수. 설정 화면 표시용.
+    var liveTabCount: Int { tabs.filter { !$0.hibernated }.count }
+
+    /// iOS가 메모리 부족을 알렸다. 보는 탭 하나만 남기고 나머지 페이지를 내리고, 들고 있던
+    /// 그림도 놓는다. 이걸 안 하면 다음 할당이 실패해 앱이 죽는다.
+    func relieveMemoryPressure() {
+        for tab in tabs where tab !== activeTab {
+            hibernate(tab)
+            tab.thumbnail = nil
+        }
+        SnapshotStore.shared.dropMemoryCache()
+    }
+
+    /// 탭의 페이지를 내린다. 뒤로가기 이력은 pendingInteractionState에 남겨 다시 고를 때
+    /// 그 자리로 돌아온다. 주소창·격자 카드는 lastURL과 디스크 그림을 그대로 쓴다.
+    func hibernate(_ tab: Tab) {
+        guard !tab.hibernated, tab.webView.url != nil, !tab.webView.isLoading else { return }
+        tab.pendingInteractionState = tab.webView.interactionState as? Data
+        tab.hibernated = true
+        tab.webView.load(URLRequest(url: URL(string: "about:blank")!))
     }
 
     /// 탭에 얹을 스크립트 목록. 차단 방식이 끄기면 광고를 건드리는 스크립트를 빼고, 나머지 두
@@ -188,6 +223,7 @@ final class TabStore {
     /// 탭이 url로 이동하기 직전. 그 사이트의 차단 방식이 지금 얹힌 것과 다르면 규칙 목록과 스크립트를
     /// 갈아 끼운다 — 이동 정책을 결정하기 전에 바꿔야 그 문서와 하위 요청부터 새 방식이 먹는다.
     func applyBlocking(to tab: Tab, for url: URL) {
+        if tab.bypassBlockerForNextLoad { return }   // 이번 로드는 규칙 없이 간다
         let mode = blockingModes.mode(for: url)
         guard mode != tab.appliedBlockingMode else { return }
         tab.appliedBlockingMode = mode
@@ -231,6 +267,18 @@ final class TabStore {
         }
     }
 
+    /// 차단기가 막은 주소를 이 한 번만 규칙 없이 연다. 문서가 커밋되면 규칙을 다시 건다 —
+    /// 그 페이지 안의 광고 요청은 그때부터 다시 막힌다. 사이트 설정은 건드리지 않는다.
+    func loadBypassingBlocker(_ url: URL, in tab: Tab) {
+        tab.blockedURL = nil
+        tab.loadError = nil
+        tab.loadErrorDetail = nil
+        tab.bypassBlockerForNextLoad = true
+        tab.appliedBlockingMode = .off
+        tab.webView.configuration.userContentController.removeAllContentRuleLists()
+        tab.webView.load(URLRequest(url: url))
+    }
+
     /// 메뉴에서 이 사이트의 차단 방식을 바꿨다. 저장하고 이 탭에 바로 적용한 뒤 새로고침한다.
     /// 같은 사이트의 다른 탭은 다음 이동 때 따라온다.
     func setBlockingMode(_ mode: BlockingMode, for tab: Tab) {
@@ -254,7 +302,13 @@ final class TabStore {
         let base = tab.coordinator.onCommit
         tab.coordinator.onCommit = { [weak self, weak tab] url in
             base?(url)
-            if let tab { self?.history.record(url: url, tabID: tab.id) }
+            guard let tab else { return }
+            // 규칙 없이 연 문서가 떴다 — 이제부터는 사이트 설정대로 다시 건다.
+            if tab.bypassBlockerForNextLoad {
+                tab.bypassBlockerForNextLoad = false
+                self?.applyBlocking(to: tab, for: url)
+            }
+            self?.history.record(url: url, tabID: tab.id)
             self?.saveState()
         }
         // SPA 이동은 didCommit이 안 뜬다 — 로드 없는 주소 변화로 찍는다.
@@ -281,6 +335,7 @@ final class TabStore {
             self?.openLinkInNewTab(url, from: tab)
         }
         tabs.append(tab)
+        activeTab?.thumbnail = nil
         activeTab = tab
     }
 
@@ -307,8 +362,11 @@ final class TabStore {
     }
 
     func close(_ tab: Tab) {
-        if let url = tab.webView.url ?? tab.lastURL {
-            closedTabs.append(ClosedTab(url: url, state: tab.webView.interactionState as? Data, tabID: tab.id,
+        // 절전 중인 탭은 웹뷰가 빈 페이지를 물고 있다 — 주소·이력은 저장해 둔 것을 쓴다.
+        let url = tab.hibernated ? tab.lastURL : (tab.webView.url ?? tab.lastURL)
+        let state = tab.pendingInteractionState ?? (tab.webView.interactionState as? Data)
+        if let url {
+            closedTabs.append(ClosedTab(url: url, state: state, tabID: tab.id,
                                         sticky: tab.sticky, stickyParentID: tab.stickyParentID))
             if closedTabs.count > Self.closedLimit { closedTabs.removeFirst(closedTabs.count - Self.closedLimit) }
         }
@@ -356,8 +414,20 @@ final class TabStore {
 
 
     func activate(_ tab: Tab) {
+        // 그림은 보는 탭만 들고 있다. 안 보는 탭의 카드는 디스크 그림으로 그린다.
+        if let previous = activeTab, previous !== tab { previous.thumbnail = nil }
         activeTab = tab
+        if tab.hibernated {
+            tab.hibernated = false
+            restoreContent(of: tab)
+            return
+        }
         guard tab.webView.url == nil else { return }
+        restoreContent(of: tab)
+    }
+
+    /// 빈 웹뷰에 페이지를 되살린다. 이력이 있으면 이력째, 없으면 주소만.
+    private func restoreContent(of tab: Tab) {
         if let state = tab.pendingInteractionState {
             tab.pendingInteractionState = nil
             tab.webView.interactionState = state

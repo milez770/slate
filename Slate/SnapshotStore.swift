@@ -86,6 +86,11 @@ final class SnapshotStore: @unchecked Sendable {
         }
     }
 
+    /// 메모리에 든 그림만 놓는다. 디스크는 그대로라 다음 조회 때 다시 읽는다.
+    func dropMemoryCache() {
+        io.async { [weak self] in self?.cache.removeAllObjects() }
+    }
+
     func deleteAll() {
         io.async { [weak self] in
             guard let self else { return }

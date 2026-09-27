@@ -24,23 +24,6 @@ struct HistoryRun: Identifiable {
     var first: Visit { visits.first! }
 }
 
-/// history.json을 순서대로 쓰는 배경 일꾼. 더 새 스냅샷이 이미 씌었으면 옛 것은 건너뛴다.
-actor HistoryWriter {
-    private static let logger = Logger(subsystem: "com.wonseon.slate", category: "history")
-    private var latest = 0
-
-    func write(_ visits: [Visit], generation: Int, to url: URL) {
-        guard generation > latest else { return }
-        latest = generation
-        do {
-            let data = try JSONEncoder().encode(visits)
-            try data.write(to: url, options: .atomic)
-        } catch {
-            Self.logger.error("write(): \(error.localizedDescription, privacy: .public)")
-        }
-    }
-}
-
 @MainActor
 @Observable
 final class HistoryStore {
@@ -66,7 +49,7 @@ final class HistoryStore {
     @ObservationIgnored private var legacyRecordData: [UUID: Data] = [:]
     @ObservationIgnored private var saveScheduled = false
     @ObservationIgnored private var generation = 0
-    @ObservationIgnored private let writer = HistoryWriter()
+    @ObservationIgnored private let writer = JSONFileWriter()
 
     init(fileURL: URL) {
         self.fileURL = fileURL

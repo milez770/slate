@@ -36,6 +36,96 @@ final class TabStoreTests: XCTestCase {
         XCTAssertTrue(store.closedTabs.isEmpty)
     }
 
+    /// 메모리 부족 알림이 오면 보는 탭만 남기고 나머지 페이지를 내린다. 주소는 남고, 다시 고르면 돌아온다.
+    @MainActor func testMemoryWarningHibernatesInactiveTabsAndActivateRestores() async throws {
+        let store = TabStore(defaults: UserDefaults(suiteName: #function)!)
+        store.newTab()
+        store.newTab()
+        let a = store.tabs[0], b = store.tabs[1]
+        // 창에 붙어 있어야 웹뷰가 로드를 진행한다.
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        for tab in [a, b] {
+            tab.webView.frame = window.bounds
+            window.addSubview(tab.webView)
+        }
+        window.isHidden = false
+        a.webView.loadHTMLString("<p>A</p>", baseURL: URL(string: "https://a.example/")!)
+        b.webView.loadHTMLString("<p>B</p>", baseURL: URL(string: "https://b.example/")!)
+        try await waitUntil(describe: {
+            "a.url=\(String(describing: a.webView.url)) a.loading=\(a.webView.isLoading) a.last=\(String(describing: a.lastURL)) b.url=\(String(describing: b.webView.url)) b.loading=\(b.webView.isLoading) b.last=\(String(describing: b.lastURL))"
+        }) { !a.webView.isLoading && !b.webView.isLoading && a.lastURL != nil && b.lastURL != nil }
+        store.activate(a)
+
+        store.relieveMemoryPressure()
+        XCTAssertFalse(a.hibernated, "보는 탭은 그대로")
+        XCTAssertTrue(b.hibernated)
+        XCTAssertNotNil(b.pendingInteractionState, "뒤로가기 이력을 들고 있다")
+        XCTAssertEqual(store.liveTabCount, 1)
+        try await waitUntil { b.webView.url?.absoluteString == "about:blank" }
+        XCTAssertEqual(b.lastURL, URL(string: "https://b.example/")!, "빈 페이지 로드가 주소를 덮지 않는다")
+
+        store.activate(b)
+        XCTAssertFalse(b.hibernated)
+        XCTAssertNil(b.pendingInteractionState, "복원에 썼다")
+        try await waitUntil { b.webView.url?.host == "b.example" }
+    }
+
+    /// 페이지가 떠 있는 탭에서 차단기가 이동을 막으면 오류 화면이 아니라 띠다. 빈 탭이면 오류 화면에
+    /// "차단 없이 열기" 근거(blockedURL)가 남는다.
+    @MainActor func testBlockedNavigationShowsBannerWhenPageExistsAndErrorWhenNot() async throws {
+        let store = TabStore(defaults: UserDefaults(suiteName: #function)!)
+        store.newTab()
+        let tab = store.tabs[0]
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        tab.webView.frame = window.bounds
+        window.addSubview(tab.webView)
+        window.isHidden = false
+        let blocked = URL(string: "https://ads.example/land")!
+        let error = NSError(domain: "WebKitErrorDomain", code: 104,
+                            userInfo: [NSURLErrorFailingURLErrorKey: blocked, NSLocalizedDescriptionKey: "차단"])
+
+        tab.coordinator.onFail?(error)
+        XCTAssertEqual(tab.loadError, "차단", "빈 탭의 첫 로드가 막히면 오류 화면")
+        XCTAssertEqual(tab.blockedURL, blocked)
+
+        tab.coordinator.onStart?()
+        tab.webView.loadHTMLString("<p>A</p>", baseURL: URL(string: "https://a.example/")!)
+        try await waitUntil { !tab.webView.isLoading && tab.webView.url?.host == "a.example" && tab.lastURL?.host == "a.example" }
+        tab.coordinator.onFail?(error)
+        XCTAssertNil(tab.loadError, "페이지가 있으면 오류 화면을 덮지 않는다")
+        XCTAssertEqual(tab.blockedURL, blocked, "띠로 알린다")
+        XCTAssertEqual(tab.lastURL?.host, "a.example", "주소창은 원래 페이지")
+    }
+
+    /// "차단 없이 열기"는 그 로드 한 번만 규칙을 빼고, 문서가 커밋되면 사이트 설정대로 되돌린다.
+    @MainActor func testBypassLoadSkipsRulesUntilCommit() {
+        let store = TabStore(defaults: UserDefaults(suiteName: #function)!)
+        store.newTab()
+        let tab = store.tabs[0]
+        let url = URL(string: "https://site7.com/detail/1")!
+        tab.blockedURL = url
+        tab.loadError = "차단"
+        store.loadBypassingBlocker(url, in: tab)
+        XCTAssertTrue(tab.bypassBlockerForNextLoad)
+        XCTAssertEqual(tab.appliedBlockingMode, .off)
+        XCTAssertNil(tab.blockedURL)
+        XCTAssertNil(tab.loadError)
+        store.applyBlocking(to: tab, for: url)
+        XCTAssertEqual(tab.appliedBlockingMode, .off, "커밋 전에는 규칙을 다시 걸지 않는다")
+        tab.coordinator.onCommit?(url)
+        XCTAssertFalse(tab.bypassBlockerForNextLoad)
+        XCTAssertEqual(tab.appliedBlockingMode, .full, "커밋되면 사이트 설정(전부 차단)으로 돌아온다")
+    }
+
+    @MainActor private func waitUntil(timeout: Duration = .seconds(25), describe: () -> String = { "" },
+                                      _ condition: () -> Bool) async throws {
+        let deadline = ContinuousClock.now + timeout
+        while !condition() {
+            if ContinuousClock.now > deadline { XCTFail("시간 안에 조건이 안 됐다 \(describe())"); return }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+    }
+
     @MainActor func testClosedTabsKeepOnlyLastTen() {
         let store = TabStore(defaults: UserDefaults(suiteName: #function)!)
         for i in 0..<12 {

@@ -144,6 +144,13 @@ final class BrowserCoordinator: NSObject, WKUIDelegate, WKNavigationDelegate {
         return true
     }
 
+    /// 콘텐츠 차단기가 문서 자체를 막았다(WebKitErrorDomain 104). 광고 착륙 페이지로 넘기는
+    /// 이동이 대부분이고, 원래 페이지는 그대로 남아 있다.
+    nonisolated static func isBlockedByContentBlocker(_ error: Error) -> Bool {
+        let error = error as NSError
+        return error.domain == "WebKitErrorDomain" && error.code == 104
+    }
+
     /// 다른 앱에서 열지 묻는다. 주소를 그대로 보여준다 — 광고가 앱스토어로 보내는 시도를
     /// 사용자가 알아보고 거절할 수 있게. 열 앱이 없으면 그렇다고 알린다.
     private func confirmOpenExternalApp(_ url: URL, from webView: WKWebView) {
