@@ -262,7 +262,7 @@ struct BrowserView: View {
                     }
                     .accessibilityIdentifier("retryLoadButton")
                     // 차단기가 막은 첫 로드. 정말 가려던 페이지면 이 한 번은 규칙 없이 연다.
-                    if let blocked = tab.blockedURL {
+                    if let blocked = tab.blockedURL, tab.blockedKind == .contentRule {
                         Button { store.loadBypassingBlocker(blocked, in: tab) } label: {
                             Text("차단 없이 열기")
                                 .font(.subheadline.weight(.semibold))
@@ -291,15 +291,20 @@ struct BrowserView: View {
                 Image(systemName: "shield.slash")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.secondary)
-                Text(tab.blockedRecovered
-                     ? "광고로 넘기는 이동을 막고 누른 링크로 갑니다 · \(blocked.host ?? "")"
-                     : "막은 이동 · \(blocked.host ?? blocked.absoluteString)")
+                Text(blockedBannerText(blocked))
                     .font(.footnote)
                     .lineLimit(1)
-                if !tab.blockedRecovered {
+                switch tab.blockedKind {
+                case .contentRule:
                     Button("열기") { store.loadBypassingBlocker(blocked, in: tab) }
                         .font(.footnote.weight(.semibold))
                         .buttonStyle(.borderless)
+                case .scriptJump:
+                    Button("열기") { store.openBlockedTarget(blocked, in: tab) }
+                        .font(.footnote.weight(.semibold))
+                        .buttonStyle(.borderless)
+                case .recovered:
+                    EmptyView()
                 }
             }
             .padding(.horizontal, 14)
@@ -308,6 +313,15 @@ struct BrowserView: View {
             .padding(.bottom, barHeight + homeIndicatorInset + 10)
             .transition(.move(edge: .bottom).combined(with: .opacity))
             .accessibilityIdentifier("blockedBanner")
+        }
+    }
+
+    private func blockedBannerText(_ blocked: URL) -> String {
+        let host = blocked.host ?? blocked.absoluteString
+        switch tab.blockedKind {
+        case .contentRule: return "막은 이동 · \(host)"
+        case .scriptJump: return "딴 사이트로 보내는 이동을 막았다 · \(host)"
+        case .recovered: return "광고 이동을 막고 누른 링크로 갑니다 · \(host)"
         }
     }
 

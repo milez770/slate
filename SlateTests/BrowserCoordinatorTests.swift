@@ -67,13 +67,14 @@ final class BrowserCoordinatorTests: XCTestCase {
     /// 누른 링크와, 화면을 만진 뒤 2초 안의 스크립트 이동(카드의 클릭 핸들러가 location을 바꾸는
     /// 사이트)은 돌린다. 폼 전송·뒤로가기·새로고침·손 안 댄 리다이렉트는 제자리.
     func testDetourCoversTapsAndTouchDrivenScriptNavigation() {
-        XCTAssertTrue(BrowserCoordinator.shouldDetour(type: .linkActivated, touchAge: nil))
-        XCTAssertTrue(BrowserCoordinator.shouldDetour(type: .other, touchAge: 0.3))
-        XCTAssertFalse(BrowserCoordinator.shouldDetour(type: .other, touchAge: nil))
-        XCTAssertFalse(BrowserCoordinator.shouldDetour(type: .other, touchAge: 4))
-        XCTAssertFalse(BrowserCoordinator.shouldDetour(type: .formSubmitted, touchAge: 0.1))
-        XCTAssertFalse(BrowserCoordinator.shouldDetour(type: .backForward, touchAge: 0.1))
-        XCTAssertFalse(BrowserCoordinator.shouldDetour(type: .reload, touchAge: 0.1))
+        let sameSite = URL(string: "https://example.org/view/9.html")!
+        XCTAssertTrue(BrowserCoordinator.shouldDetour(type: .linkActivated, target: sameSite, current: page, touchAge: nil))
+        XCTAssertTrue(BrowserCoordinator.shouldDetour(type: .other, target: sameSite, current: page, touchAge: 0.3))
+        XCTAssertFalse(BrowserCoordinator.shouldDetour(type: .other, target: sameSite, current: page, touchAge: nil))
+        XCTAssertFalse(BrowserCoordinator.shouldDetour(type: .other, target: sameSite, current: page, touchAge: 4))
+        XCTAssertFalse(BrowserCoordinator.shouldDetour(type: .formSubmitted, target: sameSite, current: page, touchAge: 0.1))
+        XCTAssertFalse(BrowserCoordinator.shouldDetour(type: .backForward, target: sameSite, current: page, touchAge: 0.1))
+        XCTAssertFalse(BrowserCoordinator.shouldDetour(type: .reload, target: sameSite, current: page, touchAge: 0.1))
     }
 
     func testPanelTitleShowsHost() {
@@ -149,6 +150,35 @@ final class BrowserCoordinatorTests: XCTestCase {
         XCTAssertFalse(BrowserCoordinator.shouldRecoverHijack(type: .linkActivated, target: ad, current: page, intent: detail),
                        "링크 탭 자체는 가로채기가 아니다")
         XCTAssertFalse(BrowserCoordinator.shouldRecoverHijack(type: .other, target: ad, current: page, intent: nil))
+    }
+
+    /// 스크립트가 여는 창은 누른 앵커와 같은 주소일 때만 싣는다 — 같은 사이트의 광고 중계 페이지를
+    /// 아무 클릭에나 여는 수법은 버린다. 사용자가 누른 target=_blank 링크는 싣는다.
+    func testScriptedNewWindowIsHonoredOnlyWhenItMatchesTappedLink() {
+        let promo = URL(string: "https://example.org/promotion/x/")!
+        let detail = URL(string: "https://example.org/gallery/1/")!
+        XCTAssertFalse(BrowserCoordinator.shouldHonorNewWindow(type: .other, url: promo, intent: nil))
+        XCTAssertFalse(BrowserCoordinator.shouldHonorNewWindow(type: .other, url: promo,
+                                                               intent: intent(detail.absoluteString, prevented: false)))
+        XCTAssertTrue(BrowserCoordinator.shouldHonorNewWindow(type: .other, url: detail,
+                                                              intent: intent(detail.absoluteString, prevented: true)))
+        XCTAssertTrue(BrowserCoordinator.shouldHonorNewWindow(type: .linkActivated, url: promo, intent: nil))
+    }
+
+    /// 고정 탭의 새 탭 우회는 같은 사이트 안 스크립트 이동에만 건다 — 딴 사이트 스크립트 이동은
+    /// 광고라 isScriptJump가 끊는다.
+    func testDetourAndScriptJumpSplitByCrossSite() {
+        let sameSite = URL(string: "https://example.org/view/9.html")!
+        XCTAssertTrue(BrowserCoordinator.shouldDetour(type: .other, target: sameSite, current: page, touchAge: 0.3))
+        XCTAssertFalse(BrowserCoordinator.shouldDetour(type: .other, target: ad, current: page, touchAge: 0.3))
+        XCTAssertTrue(BrowserCoordinator.shouldDetour(type: .linkActivated, target: ad, current: page, touchAge: nil))
+        XCTAssertTrue(BrowserCoordinator.isScriptJump(type: .other, target: ad, current: page, touchAge: 0.3, intent: nil))
+        XCTAssertFalse(BrowserCoordinator.isScriptJump(type: .other, target: ad, current: page, touchAge: nil, intent: nil),
+                       "손 안 댄 리다이렉트(로그인 흐름)는 통과")
+        XCTAssertFalse(BrowserCoordinator.isScriptJump(type: .other, target: ad, current: page, touchAge: 0.3,
+                                                       intent: intent("https://ad-network.example/go", prevented: false)),
+                       "누른 링크가 그 사이트로 가는 것이면 통과")
+        XCTAssertFalse(BrowserCoordinator.isScriptJump(type: .other, target: sameSite, current: page, touchAge: 0.3, intent: nil))
     }
 
     func testRegistrableDomainKeepsShortSecondLevel() {

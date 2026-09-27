@@ -118,7 +118,7 @@ final class TabStoreTests: XCTestCase {
         tab.coordinator.onFail?(error)
         XCTAssertNil(tab.loadError)
         XCTAssertEqual(tab.blockedURL, ad)
-        XCTAssertTrue(tab.blockedRecovered)
+        XCTAssertEqual(tab.blockedKind, .recovered)
         try await waitUntil { tab.webView.url?.path == "/detail/1" }
         // 시험 환경엔 네트워크가 없어 그 로드는 실패하고 주소는 원래 페이지로 돌아온다.
         try await waitUntil { !tab.webView.isLoading && tab.webView.url?.path == "/" }

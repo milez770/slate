@@ -17,6 +17,8 @@ final class BrowserCoordinator: NSObject, WKUIDelegate, WKNavigationDelegate {
     var onMainFrameNavigation: (@MainActor (URL) -> Void)?
     /// 클릭을 가로채 광고로 보내는 이동을 끊고 누른 링크로 되돌렸다. 인자는 끊은 광고 주소.
     var onHijackRecovered: (@MainActor (URL) -> Void)?
+    /// 스크립트가 딴 사이트로 보내는 이동을 끊었다. 페이지는 그대로다. 인자는 끊은 주소.
+    var onScriptJumpBlocked: (@MainActor (URL) -> Void)?
 
     /// 사용자가 마지막으로 누른 앵커. popup-guard.js가 클릭 처리가 끝난 뒤 보낸다.
     struct ClickIntent {
@@ -90,15 +92,27 @@ final class BrowserCoordinator: NSObject, WKUIDelegate, WKNavigationDelegate {
         }
     }
 
-    /// 고정 탭이 새 탭으로 돌릴 이동인가 — 누른 링크, 또는 화면을 만진 뒤 2초 안의 스크립트 이동.
-    /// 카드가 `<a>`가 아니라 클릭 핸들러로 location을 바꾸는 사이트도 여기서 잡힌다. 폼 전송·
-    /// 뒤로가기·새로고침·손 안 댄 리다이렉트는 제자리에서 간다.
-    nonisolated static func shouldDetour(type: WKNavigationType, touchAge: TimeInterval?) -> Bool {
+    /// 고정 탭이 새 탭으로 돌릴 이동인가 — 누른 링크, 또는 화면을 만진 뒤 2초 안의 같은 사이트
+    /// 스크립트 이동. 카드가 `<a>`가 아니라 클릭 핸들러로 location을 바꾸는 사이트도 여기서 잡힌다.
+    /// 딴 사이트로 가는 스크립트 이동은 광고이므로 새 탭으로 돌리지 않는다(isScriptJump가 끊는다).
+    /// 폼 전송·뒤로가기·새로고침·손 안 댄 리다이렉트는 제자리에서 간다.
+    nonisolated static func shouldDetour(type: WKNavigationType, target: URL, current: URL?,
+                                         touchAge: TimeInterval?) -> Bool {
         switch type {
         case .linkActivated: return true
-        case .other: return (touchAge ?? .infinity) < 2
+        case .other: return (touchAge ?? .infinity) < 2 && !isCrossSite(target, current: current)
         default: return false
         }
+    }
+
+    /// 스크립트가 사용자를 딴 사이트로 보내는 이동인가 — 화면을 만진 뒤 2초 안에 스크립트가 시작한
+    /// 딴 사이트 이동인데, 누른 앵커가 그 사이트를 가리키고 있지 않을 때. 광고 착륙 페이지로 넘기는
+    /// 수법이 대부분이라 페이지를 벗어나지 않게 끊는다. 손 안 댄 리다이렉트(로그인 흐름 등)는 통과.
+    nonisolated static func isScriptJump(type: WKNavigationType, target: URL, current: URL?,
+                                         touchAge: TimeInterval?, intent: ClickIntent?) -> Bool {
+        guard type == .other, (touchAge ?? .infinity) < 2, isCrossSite(target, current: current) else { return false }
+        if let intent, !isCrossSite(target, current: intent.url) { return false }   // 누른 링크가 그 사이트로 가는 것
+        return true
     }
 
     /// 등록 도메인(eTLD+1 근사). popup-guard.js의 registrable()과 같은 규칙.
@@ -164,11 +178,21 @@ final class BrowserCoordinator: NSObject, WKUIDelegate, WKNavigationDelegate {
             }
             return
         }
+        // 스크립트가 딴 사이트로 보내는 이동: 광고다. 새 탭으로도, 제자리로도 가지 않고 끊는다.
+        if navigationAction.targetFrame?.isMainFrame == true,
+           let url = navigationAction.request.url,
+           Self.isScriptJump(type: navigationAction.navigationType, target: url, current: webView.url,
+                             touchAge: touchAge, intent: recentClickIntent(within: 2)) {
+            decisionHandler(.cancel)
+            onScriptJumpBlocked?(url)
+            return
+        }
         // 고정 탭: 사용자가 일으킨 이동이 다른 페이지 모양이면 새 탭으로 돌리고 이 페이지는
         // 그대로 둔다. 쪽 넘김(숫자만 다른 이동)은 제자리에서 간다.
         if navigationAction.targetFrame?.isMainFrame == true,
-           Self.shouldDetour(type: navigationAction.navigationType, touchAge: touchAge),
            let url = navigationAction.request.url,
+           Self.shouldDetour(type: navigationAction.navigationType, target: url, current: webView.url,
+                             touchAge: touchAge),
            shouldDetourToNewTab?(url) == true {
             onOpenInNewTab?(url)
             decisionHandler(.cancel)
@@ -236,13 +260,32 @@ final class BrowserCoordinator: NSObject, WKUIDelegate, WKNavigationDelegate {
         url?.host ?? "이 페이지"
     }
 
-    // 팝업: 기본 거부. 사용자가 직접 누른 링크, 또는 화면을 만진 직후 스크립트가 여는 같은
-    // 사이트 창만 현재 탭에서 연다(다른 사이트 창은 popup-guard가 가짜 창으로 막는다). 단 같은
-    // 제스처에서 광고 신호가 왔으면 그 링크는 화면을 덮은 낚시 앵커다 — 현재 탭에도 안 싣는다.
+    /// 새 창 요청을 현재 탭(또는 고정 탭의 새 탭)에 실을 것인가. 사용자가 직접 누른 링크는 싣는다.
+    /// 스크립트가 여는 창은 누른 앵커와 같은 주소일 때만 — 같은 사이트의 광고 중계 페이지를
+    /// 아무 클릭에나 여는 수법(popup-guard는 딴 사이트 창만 가짜로 넘긴다)을 버리기 위해서다.
+    nonisolated static func shouldHonorNewWindow(type: WKNavigationType, url: URL, intent: ClickIntent?) -> Bool {
+        switch type {
+        case .linkActivated: return true
+        case .other: return intent?.url == url
+        default: return false
+        }
+    }
+
+    // 팝업: 기본 거부. 사용자가 직접 누른 링크만 현재 탭에서 연다(딴 사이트 창은 popup-guard가
+    // 가짜 창으로 막는다). 스크립트가 연 창은 누른 앵커와 같은 주소일 때만 싣고 나머지는 버리며
+    // 광고 신호로 친다. 같은 제스처에서 광고 신호가 왔으면 그 링크는 화면을 덮은 낚시 앵커다 —
+    // 현재 탭에도 안 싣는다.
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                  for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-        if Self.shouldDetour(type: navigationAction.navigationType, touchAge: touchAge),
-           let url = navigationAction.request.url {
+        if let url = navigationAction.request.url,
+           navigationAction.navigationType == .other,
+           !Self.shouldHonorNewWindow(type: .other, url: url, intent: recentClickIntent(within: 2)) {
+            noteAdIntent()
+            return nil
+        }
+        if let url = navigationAction.request.url,
+           Self.shouldHonorNewWindow(type: navigationAction.navigationType, url: url,
+                                     intent: recentClickIntent(within: 2)) {
             if let age = adIntentAge, age < 1, Self.isCrossSite(url, current: webView.url) { return nil }
             // 고정 탭이면 target=_blank 링크도 현재 탭 대신 새 탭으로.
             if shouldDetourToNewTab?(url) == true {

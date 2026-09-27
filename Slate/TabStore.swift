@@ -279,6 +279,17 @@ final class TabStore {
         tab.webView.load(URLRequest(url: url))
     }
 
+    /// 끊어 둔 딴 사이트 이동을 사용자가 열기로 했다. 규칙은 그대로 둔 채 그 주소로 간다 —
+    /// 고정 탭이면 새 탭으로.
+    func openBlockedTarget(_ url: URL, in tab: Tab) {
+        tab.blockedURL = nil
+        if tab.coordinator.shouldDetourToNewTab?(url) == true {
+            openLinkInNewTab(url, from: tab)
+        } else {
+            tab.webView.load(URLRequest(url: url))
+        }
+    }
+
     /// 메뉴에서 이 사이트의 차단 방식을 바꿨다. 저장하고 이 탭에 바로 적용한 뒤 새로고침한다.
     /// 같은 사이트의 다른 탭은 다음 이동 때 따라온다.
     func setBlockingMode(_ mode: BlockingMode, for tab: Tab) {

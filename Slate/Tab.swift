@@ -63,16 +63,40 @@ final class Tab: Identifiable {
     /// 막은 이동의 주소. 페이지가 떠 있으면 오류 화면 대신 띠로 알리고 몇 초 뒤 지운다. 빈 탭이면
     /// 오류 화면에 "차단 없이 열기"를 붙이는 근거가 된다.
     var blockedURL: URL?
-    /// 막은 이동이 클릭 가로채기였고 누른 링크로 되돌렸다. 띠에 "열기" 대신 그 사실을 적는다.
-    var blockedRecovered = false
+    /// 어떤 막음이었나. 띠 문구와 "열기"의 동작이 갈린다.
+    enum BlockedKind {
+        /// 콘텐츠 차단기 규칙이 문서를 막았다. "열기"는 그 한 번 규칙 없이 연다.
+        case contentRule
+        /// 스크립트가 딴 사이트로 보내는 이동을 끊었다. "열기"는 그 주소로 그냥 간다.
+        case scriptJump
+        /// 클릭 가로채기를 끊고 누른 링크로 되돌렸다. "열기" 없음.
+        case recovered
+    }
+    var blockedKind: BlockedKind = .contentRule
 
-    /// 막은 이동을 띠로 알린다. 몇 초 뒤 스스로 지운다.
-    private func showBlocked(_ url: URL, recovered: Bool) {
+    /// 막은 이동을 띠로 알린다. 몇 초 뒤 스스로 지운다. 막힌 이동의 출발점이 빈 중계 페이지면
+    /// 그 전 페이지로 돌아간다.
+    func showBlocked(_ url: URL, kind: BlockedKind) {
         blockedURL = url
-        blockedRecovered = recovered
+        blockedKind = kind
+        if kind != .recovered { retreatIfBlankPage() }
         Task { @MainActor [weak self] in
             try? await Task.sleep(for: .seconds(6))
-            if self?.blockedURL == url { self?.blockedURL = nil; self?.blockedRecovered = false }
+            if self?.blockedURL == url { self?.blockedURL = nil }
+        }
+    }
+
+    /// 글도 그림도 없는 페이지에서 딴 사이트로 넘기려다 막혔다면 그 페이지는 광고 중계용이다 —
+    /// 사용자가 보던 이전 페이지로 돌아간다.
+    private func retreatIfBlankPage() {
+        guard webView.canGoBack else { return }
+        let js = """
+        (function(){var b=document.body;if(!b)return true;var t=(b.innerText||'').trim();
+        return t.length<40&&document.images.length===0&&!document.querySelector('video,iframe,canvas');})()
+        """
+        webView.evaluateJavaScript(js) { [weak self] value, _ in
+            guard (value as? Bool) == true, let self, self.webView.canGoBack else { return }
+            self.webView.goBack()
         }
     }
     /// 다음 로드 한 번은 규칙 목록 없이 간다. 커밋되면 TabStore가 규칙을 다시 걸고 끈다.
@@ -139,7 +163,10 @@ final class Tab: Identifiable {
             return !URLPart.isPaginationMove(from: current, to: url)
         }
         coordinator.onHijackRecovered = { [weak self] blocked in
-            self?.showBlocked(blocked, recovered: true)
+            self?.showBlocked(blocked, kind: .recovered)
+        }
+        coordinator.onScriptJumpBlocked = { [weak self] blocked in
+            self?.showBlocked(blocked, kind: .scriptJump)
         }
         coordinator.onStart = { [weak self] in
             self?.loadError = nil
@@ -157,19 +184,19 @@ final class Tab: Identifiable {
             if BrowserCoordinator.isBlockedByContentBlocker(error), let failed, self.webView.url != nil {
                 if let intent = self.coordinator.recentClickIntent(within: 3), intent.prevented, intent.url != failed,
                    !BrowserCoordinator.isCrossSite(intent.url, current: self.webView.url) {
-                    self.showBlocked(failed, recovered: true)
+                    self.showBlocked(failed, kind: .recovered)
                     if self.coordinator.shouldDetourToNewTab?(intent.url) == true {
                         self.coordinator.onOpenInNewTab?(intent.url)
                     } else {
                         self.webView.load(URLRequest(url: intent.url))
                     }
                 } else {
-                    self.showBlocked(failed, recovered: false)
+                    self.showBlocked(failed, kind: .contentRule)
                 }
                 return
             }
             self.blockedURL = BrowserCoordinator.isBlockedByContentBlocker(error) ? failed : nil
-            self.blockedRecovered = false
+            self.blockedKind = .contentRule
             self.failedURL = failed
             // 실패한 주소를 주소창에 남긴다 — 커밋이 안 됐으므로 lastURL이 비어 있고,
             // 그대로 두면 주소창이 빈 채라 주소를 고쳐 다시 시도할 수가 없다.
