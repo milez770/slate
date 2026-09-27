@@ -1,6 +1,6 @@
 import XCTest
 
-/// JS 라우터가 링크를 가로채는 페이지에서 붙박이 우회가 도는지.
+/// JS 라우터가 링크를 가로채는 페이지에서 고정 탭 우회가 도는지.
 final class StickySpaProbe: XCTestCase {
     private static var server: TestServer!
 
@@ -51,11 +51,11 @@ final class StickySpaProbe: XCTestCase {
         address.typeText("http://localhost:\(Self.server.port)/spa\n")
         Thread.sleep(forTimeInterval: 4)
 
-        // 붙박이를 먼저 켠다 — 클릭보다 앞서야 한다. 한 번 클릭해 주소가 옮겨가면
+        // 고정을 먼저 켠다 — 클릭보다 앞서야 한다. 한 번 클릭해 주소가 옮겨가면
         // 다음 클릭은 같은 주소라 쪽 넘김으로 판정돼 통과된다.
         app.buttons["moreButton"].tap()
         Thread.sleep(forTimeInterval: 1)
-        app.buttons["이 탭 붙박이"].firstMatch.tap()
+        app.buttons["이 탭 고정"].firstMatch.tap()
         Thread.sleep(forTimeInterval: 1)
         app.webViews.links["ITEMLINK"].firstMatch.tap()
         Thread.sleep(forTimeInterval: 4)

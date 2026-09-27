@@ -29,7 +29,7 @@ final class TabStore {
         let url: URL
         let state: Data?
         let tabID: UUID
-        /// 붙박이였나·어느 붙박이에서 갈라졌었나. 되살릴 때 그룹 자리로 돌아가게 한다.
+        /// 고정 탭이었나·어느 고정 탭에서 갈라졌었나. 되살릴 때 그룹 자리로 돌아가게 한다.
         var sticky = false
         var stickyParentID: UUID?
     }
@@ -96,7 +96,13 @@ final class TabStore {
         zoomProgress = 1
         showingGrid = false
     }
+
+    /// 사이트별 광고 차단 방식. 탭이 그 사이트로 이동하기 직전에 규칙 목록·스크립트를 방식에 맞춰 갈아 끼운다.
+    let blockingModes: BlockingModeStore
     var ruleLists: [WKContentRuleList] = []
+    /// 요소 숨김 규칙을 뺀 목록. "감지 회피" 사이트를 처음 만날 때 컴파일한다.
+    private(set) var networkRuleLists: [WKContentRuleList]?
+    private var networkListsTask: Task<[WKContentRuleList], Never>?
 
     var bannerSweepEnabled: Bool {
         didSet {
@@ -117,9 +123,11 @@ final class TabStore {
     /// 파일로 둔다. 파일 이름은 탭 ID.
     private let stateDirectory: URL
 
-    init(defaults: UserDefaults = .standard, history: HistoryStore? = nil, stateDirectory: URL? = nil) {
+    init(defaults: UserDefaults = .standard, history: HistoryStore? = nil, stateDirectory: URL? = nil,
+         blockingModes: BlockingModeStore? = nil) {
         self.defaults = defaults
         self.history = history ?? .shared
+        self.blockingModes = blockingModes ?? .shared
         self.stateDirectory = stateDirectory
             ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
                 .appendingPathComponent("TabState", isDirectory: true)
@@ -135,18 +143,26 @@ final class TabStore {
         }
     }
 
-    /// 모든 탭에 얹을 스크립트 목록. 스위치 상태에 따라 달라진다.
-    private func userScripts() -> [WKUserScript] {
+    /// 탭에 얹을 스크립트 목록. 차단 방식이 끄기면 광고를 건드리는 스크립트를 빼고, 나머지 두
+    /// 방식은 광고 스크립트 껍데기(ad-stubs)까지 얹는다. 스위치 상태도 반영한다.
+    private func userScripts(for mode: BlockingMode) -> [WKUserScript] {
         var scripts = [
             UserScripts.script(named: "popup-guard", injectionTime: .atDocumentStart, forMainFrameOnly: false),
-            UserScripts.script(named: "sticky-detour", injectionTime: .atDocumentStart, forMainFrameOnly: true),
-            UserScripts.script(named: "ad-cloak", injectionTime: .atDocumentStart, forMainFrameOnly: false),
-            UserScripts.script(named: "rule-applier", injectionTime: .atDocumentStart, forMainFrameOnly: false),
-            UserScripts.script(named: "overlay-buster", injectionTime: .atDocumentEnd, forMainFrameOnly: false),
+            UserScripts.script(named: "sticky-detour", injectionTime: .atDocumentStart, forMainFrameOnly: true)
+        ]
+        if mode != .off {
+            scripts += [
+                UserScripts.script(named: "ad-stubs", injectionTime: .atDocumentStart, forMainFrameOnly: false),
+                UserScripts.script(named: "ad-cloak", injectionTime: .atDocumentStart, forMainFrameOnly: false),
+                UserScripts.script(named: "rule-applier", injectionTime: .atDocumentStart, forMainFrameOnly: false),
+                UserScripts.script(named: "overlay-buster", injectionTime: .atDocumentEnd, forMainFrameOnly: false)
+            ]
+        }
+        scripts += [
             UserScripts.script(named: "area-picker", injectionTime: .atDocumentEnd, forMainFrameOnly: true),
             UserScripts.script(named: "find-in-page", injectionTime: .atDocumentEnd, forMainFrameOnly: true)
         ]
-        if bannerSweepEnabled {
+        if mode != .off, bannerSweepEnabled {
             scripts.append(UserScripts.script(named: "banner-sweeper", injectionTime: .atDocumentEnd, forMainFrameOnly: false))
         }
         if autoTranslateEnabled {
@@ -157,16 +173,84 @@ final class TabStore {
 
     func reloadUserScripts() {
         for tab in tabs {
-            let controller = tab.webView.configuration.userContentController
-            controller.removeAllUserScripts()
-            userScripts().forEach { controller.addUserScript($0) }
+            applyUserScripts(to: tab)
+        }
+    }
+
+    private func applyUserScripts(to tab: Tab) {
+        let controller = tab.webView.configuration.userContentController
+        controller.removeAllUserScripts()
+        userScripts(for: tab.appliedBlockingMode).forEach { controller.addUserScript($0) }
+    }
+
+    // MARK: - 사이트별 광고 차단
+
+    /// 탭이 url로 이동하기 직전. 그 사이트의 차단 방식이 지금 얹힌 것과 다르면 규칙 목록과 스크립트를
+    /// 갈아 끼운다 — 이동 정책을 결정하기 전에 바꿔야 그 문서와 하위 요청부터 새 방식이 먹는다.
+    func applyBlocking(to tab: Tab, for url: URL) {
+        let mode = blockingModes.mode(for: url)
+        guard mode != tab.appliedBlockingMode else { return }
+        tab.appliedBlockingMode = mode
+        applyRuleLists(to: tab)
+        applyUserScripts(to: tab)
+    }
+
+    /// 탭의 방식에 맞는 규칙 목록을 얹는다. 감지 회피 목록이 아직 없으면 전체 목록을 임시로 얹고
+    /// 컴파일을 시작한다 — 끝나면 그 방식의 탭들에 갈아 끼운다.
+    private func applyRuleLists(to tab: Tab) {
+        let controller = tab.webView.configuration.userContentController
+        controller.removeAllContentRuleLists()
+        switch tab.appliedBlockingMode {
+        case .full:
+            ruleLists.forEach { controller.add($0) }
+        case .networkOnly:
+            if let lists = networkRuleLists {
+                lists.forEach { controller.add($0) }
+            } else {
+                ruleLists.forEach { controller.add($0) }
+                Task { @MainActor in await self.ensureNetworkRuleLists() }
+            }
+        case .off:
+            break
+        }
+    }
+
+    /// 감지 회피 목록을 준비한다. 여럿이 동시에 불러도 컴파일은 한 번. 끝나면 그 방식으로 열려 있는
+    /// 탭에 바로 얹는다 — 새로고침은 하지 않는다.
+    func ensureNetworkRuleLists() async {
+        if networkRuleLists != nil { return }
+        if networkListsTask == nil {
+            networkListsTask = Task { @MainActor in await FilterManager.shared.loadNetworkOnlyRuleLists() }
+        }
+        guard let task = networkListsTask else { return }
+        let lists = await task.value
+        guard networkRuleLists == nil else { return }
+        networkRuleLists = lists
+        for tab in tabs where tab.appliedBlockingMode == .networkOnly {
+            applyRuleLists(to: tab)
+        }
+    }
+
+    /// 메뉴에서 이 사이트의 차단 방식을 바꿨다. 저장하고 이 탭에 바로 적용한 뒤 새로고침한다.
+    /// 같은 사이트의 다른 탭은 다음 이동 때 따라온다.
+    func setBlockingMode(_ mode: BlockingMode, for tab: Tab) {
+        guard let url = tab.webView.url ?? tab.lastURL else { return }
+        blockingModes.set(mode, for: url)
+        Task { @MainActor in
+            if mode == .networkOnly { await ensureNetworkRuleLists() }
+            applyBlocking(to: tab, for: url)
+            tab.webView.reload()
         }
     }
 
     func newTab(id: UUID = UUID()) {
         let tab = Tab(id: id, configuration: Self.makeConfiguration())
-        userScripts().forEach { tab.webView.configuration.userContentController.addUserScript($0) }
+        userScripts(for: .full).forEach { tab.webView.configuration.userContentController.addUserScript($0) }
         ruleLists.forEach { tab.webView.configuration.userContentController.add($0) }
+        tab.coordinator.onMainFrameNavigation = { [weak self, weak tab] url in
+            guard let tab else { return }
+            self?.applyBlocking(to: tab, for: url)
+        }
         let base = tab.coordinator.onCommit
         tab.coordinator.onCommit = { [weak self, weak tab] url in
             base?(url)
@@ -207,17 +291,18 @@ final class TabStore {
         newTab()
         guard let tab = activeTab else { return }
         if let parent { history.setParent(parent.id, forNextVisitIn: tab.id) }
-        // 붙박이에서 갈라진 탭은 격자에서 그 붙박이 그룹에 묶인다.
+        // 고정 탭에서 갈라진 탭은 격자에서 그 고정 그룹에 묶인다.
         if sourceTab.sticky { tab.stickyParentID = sourceTab.id }
         tab.webView.load(URLRequest(url: url))
     }
 
     func prepareFilters() async {
         ruleLists = await FilterManager.shared.loadRuleLists()
+        // 필터 본문이 바뀌었을 수 있다 — 감지 회피 목록은 다음에 필요할 때 다시 컴파일한다.
+        networkRuleLists = nil
+        networkListsTask = nil
         for tab in tabs {
-            let controller = tab.webView.configuration.userContentController
-            controller.removeAllContentRuleLists()
-            ruleLists.forEach { controller.add($0) }
+            applyRuleLists(to: tab)
         }
     }
 
@@ -296,7 +381,7 @@ final class TabStore {
         let index = saved.firstIndex { $0 === activeTab } ?? max(saved.count - 1, 0)
         defaults.set(index, forKey: Self.activeKey)
         defaults.set(tabs.filter(\.sticky).map { $0.id.uuidString }, forKey: Self.stickyIDsKey)
-        // 자식 → 붙박이 부모. "자식ID:부모ID" 짝으로 저장한다.
+        // 자식 → 고정 부모. "자식ID:부모ID" 짝으로 저장한다.
         defaults.set(tabs.compactMap { tab in tab.stickyParentID.map { "\(tab.id.uuidString):\($0.uuidString)" } },
                      forKey: Self.stickyParentsKey)
         defaults.set(closedTabs.map { $0.url.absoluteString }, forKey: Self.closedKey)

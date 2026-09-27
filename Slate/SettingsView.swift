@@ -28,7 +28,7 @@ struct SettingsView: View {
                     get: { store.autoTranslateEnabled },
                     set: { store.autoTranslateEnabled = $0 }
                 ))
-                Text("페이지의 일본어·중국어 글자를 한국어로 바꾼다. 나중에 뜨는 글자도 계속 바꾼다. 기기 안에서 번역한다.")
+                Text("페이지의 일본어·중국어 글자를 한국어로 바꾼다. 나중에 뜨는 글자도 계속 바꾼다. 기기 안에서 번역한다. 원문이 필요하면 더보기 메뉴의 \"원문 보기\"로 그 탭만 새로고침 없이 되돌린다.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 let stats = TranslationStats.shared
@@ -80,6 +80,28 @@ struct SettingsView: View {
                 }
                 .disabled(refreshing || resetting)
                 if let message { Text(message).font(.caption).foregroundStyle(.secondary) }
+            }
+            Section("사이트별 광고 차단") {
+                Text("더보기 메뉴의 \"이 사이트 광고 차단\"으로 바꾼 사이트. 감지 회피는 광고 요청은 막고 요소 숨김 규칙만 빼서 광고 차단 감지를 피한다. 끄기는 그 사이트에서 차단을 전부 끈다. 삭제하면 전부 차단으로 돌아간다.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if store.blockingModes.sites.isEmpty {
+                    Text("없음").foregroundStyle(.secondary)
+                } else {
+                    ForEach(store.blockingModes.sites, id: \.self) { site in
+                        HStack(spacing: 12) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(site)
+                                    .font(.system(.footnote, design: .monospaced))
+                                Text(store.blockingModes.modes[site]?.label ?? "")
+                                    .font(.caption2).foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Button("삭제", role: .destructive) { store.blockingModes.set(.full, site: site) }
+                                .buttonStyle(.borderless)
+                        }
+                    }
+                }
             }
             Section("쿠키 규칙") {
                 Text("지정한 도메인에 쿠키를 미리 심는다. 해외에서 지역·연령 확인으로 막히는 사이트를, 그 확인을 통과하면 심어지는 쿠키를 직접 넣어 여는 데 쓴다. 앱을 켤 때 첫 로드 전에 심는다.")

@@ -42,13 +42,6 @@ struct TimelineView: View {
 
     private var timelineList: some View {
         List {
-            if !store.history.pinned.isEmpty {
-                Section("고정") {
-                    ForEach(store.history.pinned) { visit in
-                        pinnedRow(visit)
-                    }
-                }
-            }
             ForEach(Array(daySections.enumerated()), id: \.element.day) { index, section in
                 Section(dayLabel(section.day)) {
                     // 맨 위가 현재라는 걸 못 박는다. 아래로 갈수록 과거다.
@@ -200,37 +193,6 @@ struct TimelineView: View {
         }
         .swipeActions(edge: .trailing) {
             Button("삭제", role: .destructive) { store.history.remove(visit) }
-        }
-    }
-
-    /// 고정 선반의 줄. 시간 레일 밖이라 레일 없이 그린다. 스와이프는 삭제가 아니라 해제다.
-    private func pinnedRow(_ visit: Visit) -> some View {
-        Button {
-            store.openVisit(visit)
-            dismiss()
-        } label: {
-            HStack(spacing: 10) {
-                Image(systemName: "pin.fill")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                snapshot(of: visit, width: 56, height: 40, corner: 6)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(displayTitle(visit))
-                        .font(.subheadline)
-                        .lineLimit(1)
-                    Text(hostDisplay(visit.url))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                Spacer(minLength: 0)
-            }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .swipeActions(edge: .trailing) {
-            Button("고정 해제") { store.history.setPinned(false, id: visit.id) }
-                .tint(.orange)
         }
     }
 

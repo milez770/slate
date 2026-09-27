@@ -28,7 +28,7 @@ struct TabGridView: View {
         }
     }
 
-    /// 붙박이 하나와 거기서 갈라진 탭들.
+    /// 고정 탭 하나와 거기서 갈라진 탭들.
     private var stickyGroups: [(parent: Tab, children: [Tab])] {
         store.tabs.filter(\.sticky).map { parent in
             (parent, store.tabs.filter { $0.stickyParentID == parent.id })
@@ -45,7 +45,7 @@ struct TabGridView: View {
 
     private var gridScroll: some View {
         ScrollView {
-            // 붙박이 그룹은 격자 맨 위에서 리스트와 같이 스크롤된다.
+            // 고정 그룹은 격자 맨 위에서 리스트와 같이 스크롤된다.
             LazyVStack(spacing: 14) {
                 ForEach(stickyGroups, id: \.parent.id) { group in
                     stickyGroupRow(group.parent, children: group.children)
@@ -78,7 +78,7 @@ struct TabGridView: View {
             card(tab, height: height)
             closeButton(tab)
             if tab.sticky {
-                Image(systemName: "arrow.triangle.branch")
+                Image(systemName: "pin.fill")
                     .font(.system(size: 11, weight: .bold))
                     .foregroundStyle(.black)
                     .frame(width: 26, height: 26)
@@ -90,23 +90,23 @@ struct TabGridView: View {
         .id(tab.id)
     }
 
-    /// 붙박이 그룹 한 줄. 머리에 호스트, 안에 붙박이와 갈라진 탭들이 가로로 눕는다.
+    /// 고정 그룹 한 줄. 머리에 호스트, 안에 고정 탭과 갈라진 탭들이 가로로 눕는다.
     /// 스크롤에도 상단에 붙어 있어야 해서 카드를 작게 쓴다.
     private func stickyGroupRow(_ parent: Tab, children: [Tab]) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 5) {
-                Image(systemName: "arrow.triangle.branch")
+                Image(systemName: "pin.fill")
                     .font(.system(size: 9, weight: .bold))
                     .foregroundStyle(.black)
                     .frame(width: 15, height: 15)
                     .background(Color.keyGreen, in: Circle())
-                Text(parent.lastURL?.host ?? "붙박이")
+                Text(parent.lastURL?.host ?? "고정")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
             HStack(alignment: .top, spacing: 8) {
-                // 붙박이 카드는 스크롤 밖 — 갈라진 탭이 아무리 많아도 항상 이 자리다.
+                // 고정 탭 카드는 스크롤 밖 — 갈라진 탭이 아무리 많아도 항상 이 자리다.
                 tabCell(parent, height: 140)
                     .frame(width: 104)
                 ScrollView(.horizontal, showsIndicators: false) {

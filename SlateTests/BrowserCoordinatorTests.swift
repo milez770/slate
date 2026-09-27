@@ -23,6 +23,59 @@ final class BrowserCoordinatorTests: XCTestCase {
         XCTAssertTrue(BrowserCoordinator.isRealFailure(error))
     }
 
+    /// 유니버설 링크를 다른 앱에 넘기면 WebKit이 이동을 "중단"(102)으로 끝낸다 — 앱은 열렸고
+    /// 페이지는 그대로다. 이걸 실패로 치면 앱이 열린 뒤 이 탭에 오류 화면이 뜬다.
+    func testAppLinkHandoffIsNotAFailure() {
+        let interrupted = NSError(domain: "WebKitErrorDomain", code: 102)
+        XCTAssertFalse(BrowserCoordinator.isRealFailure(interrupted))
+    }
+
+    /// 콘텐츠 차단기가 문서 자체를 막은 것(104)은 진짜 실패다 — 화면에 알려야 원인을 찾는다.
+    func testContentBlockerBlockIsAFailure() {
+        let blocked = NSError(domain: "WebKitErrorDomain", code: 104)
+        XCTAssertTrue(BrowserCoordinator.isRealFailure(blocked))
+    }
+
+    // MARK: - 다른 앱을 여는 주소
+
+    func testWebSchemesStayInWebView() {
+        for raw in ["https://a.example/", "http://a.example/", "about:blank", "about:srcdoc",
+                    "data:text/html,hi", "blob:https://a.example/uuid", "javascript:void(0)"] {
+            XCTAssertTrue(BrowserCoordinator.isWebScheme(URL(string: raw)!), raw)
+        }
+    }
+
+    func testAppSchemesLeaveWebView() {
+        for raw in ["kakaotalk://open", "itms-apps://apps.apple.com/app/id1", "tel:0212345678",
+                    "mailto:a@b.example", "intent://x", "twitter://user?id=1"] {
+            XCTAssertFalse(BrowserCoordinator.isWebScheme(URL(string: raw)!), raw)
+        }
+    }
+
+    /// 사용자가 누른 링크·보낸 폼, 또는 화면을 만진 직후의 스크립트 이동만 다른 앱을 열 수 있다.
+    /// 손 안 댄 채 스크립트가 시도하는 이동(광고의 앱스토어 넘기기)은 조용히 버린다.
+    func testExternalAppOpensOnlyWhenUserInitiated() {
+        XCTAssertTrue(BrowserCoordinator.isUserInitiated(type: .linkActivated, touchAge: nil))
+        XCTAssertTrue(BrowserCoordinator.isUserInitiated(type: .formSubmitted, touchAge: nil))
+        XCTAssertTrue(BrowserCoordinator.isUserInitiated(type: .other, touchAge: 0.5))
+        XCTAssertFalse(BrowserCoordinator.isUserInitiated(type: .other, touchAge: nil))
+        XCTAssertFalse(BrowserCoordinator.isUserInitiated(type: .other, touchAge: 5))
+    }
+
+    // MARK: - 고정 탭이 새 탭으로 돌릴 이동
+
+    /// 누른 링크와, 화면을 만진 뒤 2초 안의 스크립트 이동(카드의 클릭 핸들러가 location을 바꾸는
+    /// 사이트)은 돌린다. 폼 전송·뒤로가기·새로고침·손 안 댄 리다이렉트는 제자리.
+    func testDetourCoversTapsAndTouchDrivenScriptNavigation() {
+        XCTAssertTrue(BrowserCoordinator.shouldDetour(type: .linkActivated, touchAge: nil))
+        XCTAssertTrue(BrowserCoordinator.shouldDetour(type: .other, touchAge: 0.3))
+        XCTAssertFalse(BrowserCoordinator.shouldDetour(type: .other, touchAge: nil))
+        XCTAssertFalse(BrowserCoordinator.shouldDetour(type: .other, touchAge: 4))
+        XCTAssertFalse(BrowserCoordinator.shouldDetour(type: .formSubmitted, touchAge: 0.1))
+        XCTAssertFalse(BrowserCoordinator.shouldDetour(type: .backForward, touchAge: 0.1))
+        XCTAssertFalse(BrowserCoordinator.shouldDetour(type: .reload, touchAge: 0.1))
+    }
+
     func testPanelTitleShowsHost() {
         XCTAssertEqual(BrowserCoordinator.panelTitle(for: URL(string: "https://site7.com/x?y=1")), "site7.com")
     }
@@ -105,7 +158,21 @@ final class BrowserCoordinatorTests: XCTestCase {
         let tab = Tab(configuration: WKWebViewConfiguration())
         tab.coordinator.onFail?(NSError(domain: NSURLErrorDomain, code: NSURLErrorTimedOut))
         XCTAssertNotNil(tab.loadError)
+        XCTAssertNotNil(tab.loadErrorDetail)
         tab.retryLoad()
         XCTAssertNil(tab.loadError)
+        XCTAssertNil(tab.loadErrorDetail)
+    }
+
+    /// 오류 화면에 도메인·코드·실패 주소가 같이 떠야 "페이지를 열지 못했다"만 보고 원인을
+    /// 추측하지 않는다.
+    @MainActor func testFailureRecordsDomainCodeAndURL() {
+        let tab = Tab(configuration: WKWebViewConfiguration())
+        let url = URL(string: "https://site7.com/videos/123/x/")!
+        tab.coordinator.onFail?(NSError(domain: "WebKitErrorDomain", code: 104,
+                                       userInfo: [NSURLErrorFailingURLErrorKey: url,
+                                                  NSLocalizedDescriptionKey: "콘텐츠 차단기"]))
+        XCTAssertEqual(tab.loadError, "콘텐츠 차단기")
+        XCTAssertEqual(tab.loadErrorDetail, "WebKitErrorDomain 104 · https://site7.com/videos/123/x/")
     }
 }

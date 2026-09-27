@@ -18,13 +18,13 @@ final class Tab: Identifiable {
     var isLoading = false
     var chromeCollapsed = false
     var thumbnail: UIImage?
-    /// 붙박이 탭. 켜면 링크를 눌러도 이 페이지가 남고 새 탭이 열린다. 쪽 넘김은 제자리.
+    /// 고정 탭. 켜면 링크를 눌러도 이 페이지가 남고 새 탭이 열린다. 쪽 넘김은 제자리.
     /// 페이지 안 가로채기 스크립트가 읽는 플래그를 같이 갱신한다.
     var sticky = false {
         didSet { pushStickyFlag() }
     }
 
-    /// 지금 문서에 붙박이 여부를 알린다. 문서가 갈릴 때마다 다시 심어야 한다.
+    /// 지금 문서에 고정 여부를 알린다. 문서가 갈릴 때마다 다시 심어야 한다.
     private func pushStickyFlag() {
         webView.evaluateJavaScript("window.__slateSticky = \(sticky)") { _, error in
             if let error {
@@ -32,12 +32,30 @@ final class Tab: Identifiable {
             }
         }
     }
-    /// 이 탭이 갈라져 나온 붙박이 탭. 격자에서 그 그룹에 묶인다.
+    /// 이 탭이 갈라져 나온 고정 탭. 격자에서 그 그룹에 묶인다.
     var stickyParentID: UUID?
+    /// 번역 대신 원문을 보인다. 탭 단위이고 문서가 갈리면 꺼진다.
+    var showingOriginal = false {
+        didSet { pushShowOriginal() }
+    }
+
+    /// 원문 보기 상태를 문서에 알린다. 번역을 요청해 온 하위 프레임에도 보낸다.
+    private func pushShowOriginal() {
+        let js = "window.__slateShowOriginal && window.__slateShowOriginal(\(showingOriginal)); 0"
+        webView.evaluateJavaScript(js) { _, _ in }
+        for frame in coordinator.translationFrames {
+            webView.evaluateJavaScript(js, in: frame, in: .page) { _ in }
+        }
+    }
+    /// 지금 이 탭에 얹힌 광고 차단 방식. TabStore가 이동 직전에 사이트 설정과 맞춘다.
+    @ObservationIgnored var appliedBlockingMode: BlockingMode = .full
     /// 페이지가 실제로 칠하는 배경색. 상태바 뒤를 이 색으로 메워 콘텐츠와 이어 보이게 한다.
     var pageBackground: UIColor = .systemBackground
     /// 로드 실패 사유. nil이 아니면 화면에 오류를 띄운다.
     var loadError: String?
+    /// 실패의 오류 도메인·코드·실패 주소. 오류 화면 아래에 작게 띄운다 — 사유 문장만으로는
+    /// 차단기·네트워크·WebKit 중 어디서 난 실패인지 알 수 없다.
+    var loadErrorDetail: String?
 
     /// 로드 없이 주소가 바뀔 때(SPA의 pushState — didCommit이 안 뜬다) 알린다.
     /// 로딩 중의 주소 변화는 didCommit이 맡으므로 여기서는 거른다.
@@ -69,6 +87,8 @@ final class Tab: Identifiable {
         webView.allowsLinkPreview = true
         webView.uiDelegate = coordinator
         webView.navigationDelegate = coordinator
+        // 손이 닿은 시각을 이동 정책에 알린다 — 스크립트 주도 이동이 사용자 조작에서 난 것인지 가른다.
+        webView.addGestureRecognizer(TouchObserver.make { [weak coordinator] in coordinator?.noteUserTouch() })
         webView.configuration.userContentController.add(coordinator, name: "slateAdIntent")
         webView.configuration.userContentController.add(coordinator, name: "slateStickyOpen")
         webView.configuration.userContentController.add(coordinator, name: "slateTranslate")
@@ -79,6 +99,8 @@ final class Tab: Identifiable {
             self.canGoForward = self.webView.canGoForward
             self.applyStoredRules()
             self.pushStickyFlag()
+            // 새 문서는 번역으로 시작한다.
+            if self.showingOriginal { self.showingOriginal = false }
         }
         coordinator.onFinish = { [weak self] webView in
             // didCommit과 atDocumentStart 스크립트 실행의 선후는 WebKit이 보장하지 않는다.
@@ -96,15 +118,19 @@ final class Tab: Identifiable {
         }
         coordinator.onStart = { [weak self] in
             self?.loadError = nil
+            self?.loadErrorDetail = nil
             self?.failedURL = nil
         }
         coordinator.onFail = { [weak self] error in
-            let failed = (error as NSError).userInfo[NSURLErrorFailingURLErrorKey] as? URL
+            let error = error as NSError
+            let failed = error.userInfo[NSURLErrorFailingURLErrorKey] as? URL
             self?.failedURL = failed
             // 실패한 주소를 주소창에 남긴다 — 커밋이 안 됐으므로 lastURL이 비어 있고,
             // 그대로 두면 주소창이 빈 채라 주소를 고쳐 다시 시도할 수가 없다.
             if let failed { self?.lastURL = failed }
             self?.loadError = error.localizedDescription
+            self?.loadErrorDetail = ["\(error.domain) \(error.code)", failed?.absoluteString]
+                .compactMap { $0 }.joined(separator: " · ")
         }
 
         let refreshControl = UIRefreshControl()
@@ -200,6 +226,7 @@ final class Tab: Identifiable {
     /// 실패한 주소를 다시 연다. 잡아둔 주소가 없으면 현재 주소로, 그것도 없으면 새로고침.
     func retryLoad() {
         loadError = nil
+        loadErrorDetail = nil
         if let url = failedURL ?? webView.url ?? lastURL {
             webView.load(URLRequest(url: url))
         } else {

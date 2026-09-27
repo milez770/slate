@@ -11,8 +11,13 @@ final class BrowserCoordinator: NSObject, WKUIDelegate, WKNavigationDelegate {
     var onFail: (@MainActor (Error) -> Void)?
     /// 링크 롱탭 메뉴의 "새 탭에서 열기".
     var onOpenInNewTab: (@MainActor (URL) -> Void)?
-    /// 붙박이 탭: 이 이동을 새 탭으로 돌려야 하면 true. 원래 페이지는 남는다.
+    /// 고정 탭: 이 이동을 새 탭으로 돌려야 하면 true. 원래 페이지는 남는다.
     var shouldDetourToNewTab: (@MainActor (URL) -> Bool)?
+    /// 메인 프레임이 이 주소로 이동하기 직전. 사이트별 차단 방식을 갈아 끼우는 데 쓴다.
+    var onMainFrameNavigation: (@MainActor (URL) -> Void)?
+
+    /// 번역을 요청해 온 하위 프레임. 원문 보기 토글을 이 프레임들에도 보낸다. 문서가 갈리면 비운다.
+    private(set) var translationFrames: [WKFrameInfo] = []
 
     /// popup-guard가 광고 수법(창 열기·가짜 클릭)을 막은 마지막 시각. 광고 스크립트는
     /// 막히면 location 이동으로 넘어가는데, 그건 JS로 못 막는다 — 이 신호 직후의 딴 사이트
@@ -25,6 +30,45 @@ final class BrowserCoordinator: NSObject, WKUIDelegate, WKNavigationDelegate {
 
     private var adIntentAge: TimeInterval? {
         lastAdIntent.map { Date().timeIntervalSince($0) }
+    }
+
+    /// 웹뷰에 손이 닿은 마지막 시각. 스크립트 주도 이동(.other)이 사용자 조작에서 난 것인지 가른다.
+    private var lastTouch: Date?
+
+    func noteUserTouch() {
+        lastTouch = Date()
+    }
+
+    private var touchAge: TimeInterval? {
+        lastTouch.map { Date().timeIntervalSince($0) }
+    }
+
+    /// 웹뷰가 스스로 보여줄 수 있는 스킴. 그 밖(kakaotalk:·itms-apps:·tel: 등)은 다른 앱의 몫이다.
+    nonisolated static let webSchemes: Set<String> = ["http", "https", "about", "blob", "data", "file", "javascript"]
+
+    nonisolated static func isWebScheme(_ url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased() else { return true }
+        return webSchemes.contains(scheme)
+    }
+
+    /// 사용자가 시작한 이동인가 — 누른 링크·보낸 폼, 또는 화면을 만진 뒤 2초 안의 스크립트 이동.
+    /// 다른 앱 열기는 이것만 허용한다. 손 안 댄 채 스크립트가 시도하는 것(광고의 앱스토어 넘기기)은 버린다.
+    nonisolated static func isUserInitiated(type: WKNavigationType, touchAge: TimeInterval?) -> Bool {
+        switch type {
+        case .linkActivated, .formSubmitted: return true
+        default: return (touchAge ?? .infinity) < 2
+        }
+    }
+
+    /// 고정 탭이 새 탭으로 돌릴 이동인가 — 누른 링크, 또는 화면을 만진 뒤 2초 안의 스크립트 이동.
+    /// 카드가 `<a>`가 아니라 클릭 핸들러로 location을 바꾸는 사이트도 여기서 잡힌다. 폼 전송·
+    /// 뒤로가기·새로고침·손 안 댄 리다이렉트는 제자리에서 간다.
+    nonisolated static func shouldDetour(type: WKNavigationType, touchAge: TimeInterval?) -> Bool {
+        switch type {
+        case .linkActivated: return true
+        case .other: return (touchAge ?? .infinity) < 2
+        default: return false
+        }
     }
 
     /// 등록 도메인(eTLD+1 근사). popup-guard.js의 registrable()과 같은 규칙.
@@ -58,6 +102,15 @@ final class BrowserCoordinator: NSObject, WKUIDelegate, WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        // 웹뷰가 못 보여주는 스킴은 웹뷰에 태우지 않는다 — 태우면 "URL을 표시할 수 없다"
+        // 오류로 끝난다. 사용자가 시작한 이동이면 다른 앱에서 열지 묻는다.
+        if let url = navigationAction.request.url, !Self.isWebScheme(url) {
+            decisionHandler(.cancel)
+            if Self.isUserInitiated(type: navigationAction.navigationType, touchAge: touchAge) {
+                confirmOpenExternalApp(url, from: webView)
+            }
+            return
+        }
         if navigationAction.targetFrame?.isMainFrame == true,
            let url = navigationAction.request.url,
            Self.shouldBlockNavigation(type: navigationAction.navigationType, target: url,
@@ -65,24 +118,63 @@ final class BrowserCoordinator: NSObject, WKUIDelegate, WKNavigationDelegate {
             decisionHandler(.cancel)
             return
         }
-        // 붙박이 탭: 사용자가 누른 링크가 다른 페이지 모양이면 새 탭으로 돌리고
-        // 이 페이지는 그대로 둔다. 쪽 넘김(숫자만 다른 이동)은 제자리에서 간다.
+        // 고정 탭: 사용자가 일으킨 이동이 다른 페이지 모양이면 새 탭으로 돌리고 이 페이지는
+        // 그대로 둔다. 쪽 넘김(숫자만 다른 이동)은 제자리에서 간다.
         if navigationAction.targetFrame?.isMainFrame == true,
-           navigationAction.navigationType == .linkActivated,
+           Self.shouldDetour(type: navigationAction.navigationType, touchAge: touchAge),
            let url = navigationAction.request.url,
            shouldDetourToNewTab?(url) == true {
             onOpenInNewTab?(url)
             decisionHandler(.cancel)
             return
         }
+        if navigationAction.targetFrame?.isMainFrame == true, let url = navigationAction.request.url {
+            onMainFrameNavigation?(url)
+        }
         decisionHandler(.allow)
     }
 
-    /// 로딩 도중 다른 곳으로 이동하면 앞선 로드가 취소 오류로 끝난다 — 실패가 아니므로
-    /// 화면에 알리지 않는다. 이걸 거르지 않으면 멀쩡한 이동마다 오류가 뜬다.
+    /// 화면에 알릴 실패인가. 로딩 도중 다른 곳으로 이동하면 앞선 로드가 취소(-999)로 끝나고,
+    /// 유니버설 링크를 다른 앱에 넘기면 WebKit이 그 이동을 중단(WebKitErrorDomain 102)으로
+    /// 끝낸다 — 둘 다 페이지는 멀쩡하다. 거르지 않으면 멀쩡한 이동·앱 열기마다 오류가 뜬다.
     nonisolated static func isRealFailure(_ error: Error) -> Bool {
         let error = error as NSError
-        return !(error.domain == NSURLErrorDomain && error.code == NSURLErrorCancelled)
+        if error.domain == NSURLErrorDomain && error.code == NSURLErrorCancelled { return false }
+        if error.domain == "WebKitErrorDomain" && error.code == 102 { return false }
+        return true
+    }
+
+    /// 다른 앱에서 열지 묻는다. 주소를 그대로 보여준다 — 광고가 앱스토어로 보내는 시도를
+    /// 사용자가 알아보고 거절할 수 있게. 열 앱이 없으면 그렇다고 알린다.
+    private func confirmOpenExternalApp(_ url: URL, from webView: WKWebView) {
+        guard let presenter = presenter(for: webView) else { return }
+        let alert = UIAlertController(title: "다른 앱에서 열기",
+                                      message: String(url.absoluteString.prefix(200)), preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "취소", style: .cancel) { [weak self] _ in
+            self?.dismissActivePanel = nil
+        })
+        let open = UIAlertAction(title: "열기", style: .default) { [weak self, weak webView] _ in
+            self?.dismissActivePanel = nil
+            UIApplication.shared.open(url) { opened in
+                guard !opened else { return }
+                Task { @MainActor in
+                    guard let self, let webView else { return }
+                    self.notify("이 주소를 열 수 있는 앱이 없다", on: webView)
+                }
+            }
+        }
+        alert.addAction(open)
+        alert.preferredAction = open
+        presentPanel(alert, on: presenter, cancel: {})
+    }
+
+    private func notify(_ message: String, on webView: WKWebView) {
+        guard let presenter = presenter(for: webView) else { return }
+        let alert = UIAlertController(title: nil, message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "확인", style: .default) { [weak self] _ in
+            self?.dismissActivePanel = nil
+        })
+        presentPanel(alert, on: presenter, cancel: {})
     }
 
     /// 웹페이지가 띄우는 알림창 제목. 어느 사이트가 띄웠는지 보여준다 — 광고가 연달아
@@ -91,13 +183,15 @@ final class BrowserCoordinator: NSObject, WKUIDelegate, WKNavigationDelegate {
         url?.host ?? "이 페이지"
     }
 
-    // 팝업: 기본 거부. 사용자가 직접 누른 링크만 현재 탭에서 연다. 단 같은 제스처에서
-    // 광고 신호가 왔으면 그 링크는 화면을 덮은 낚시 앵커다 — 현재 탭에도 안 싣는다.
+    // 팝업: 기본 거부. 사용자가 직접 누른 링크, 또는 화면을 만진 직후 스크립트가 여는 같은
+    // 사이트 창만 현재 탭에서 연다(다른 사이트 창은 popup-guard가 가짜 창으로 막는다). 단 같은
+    // 제스처에서 광고 신호가 왔으면 그 링크는 화면을 덮은 낚시 앵커다 — 현재 탭에도 안 싣는다.
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                  for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-        if navigationAction.navigationType == .linkActivated, let url = navigationAction.request.url {
+        if Self.shouldDetour(type: navigationAction.navigationType, touchAge: touchAge),
+           let url = navigationAction.request.url {
             if let age = adIntentAge, age < 1, Self.isCrossSite(url, current: webView.url) { return nil }
-            // 붙박이 탭이면 target=_blank 링크도 현재 탭 대신 새 탭으로.
+            // 고정 탭이면 target=_blank 링크도 현재 탭 대신 새 탭으로.
             if shouldDetourToNewTab?(url) == true {
                 onOpenInNewTab?(url)
                 return nil
@@ -126,6 +220,7 @@ final class BrowserCoordinator: NSObject, WKUIDelegate, WKNavigationDelegate {
     }
 
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        translationFrames.removeAll()
         if let url = webView.url { onCommit?(url) }
     }
 
@@ -236,7 +331,7 @@ final class BrowserCoordinator: NSObject, WKUIDelegate, WKNavigationDelegate {
 }
 
 extension BrowserCoordinator: WKScriptMessageHandler {
-    /// popup-guard.js의 slateAdIntent 신호, sticky-detour.js의 붙박이 열기 요청,
+    /// popup-guard.js의 slateAdIntent 신호, sticky-detour.js의 고정 탭 새 탭 열기 요청,
     /// auto-translate.js의 번역 요청.
     func userContentController(_ userContentController: WKUserContentController,
                                didReceive message: WKScriptMessage) {
@@ -248,6 +343,10 @@ extension BrowserCoordinator: WKScriptMessageHandler {
         case "slateTranslate":
             guard let items = message.body as? [[String: Any]], let webView = message.webView else { return }
             let frame = message.frameInfo
+            if !frame.isMainFrame, translationFrames.count < 50,
+               !translationFrames.contains(where: { $0.request.url == frame.request.url }) {
+                translationFrames.append(frame)
+            }
             Task { @MainActor in
                 let reply = await Self.translateReply(items)
                 // 요청이 온 프레임에 돌려준다. 기본 evaluateJavaScript는 메인 프레임에만 닿는다.

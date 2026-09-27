@@ -183,7 +183,6 @@ extension CKRecord.FieldKey {
     static let visitTabID = "tabID"
     static let visitPrevID = "prevVisitID"
     static let visitParentID = "parentVisitID"
-    static let visitPinnedAt = "pinnedAt"
 }
 
 private extension CKRecord {
@@ -204,7 +203,6 @@ private extension CKRecord {
                      tabID: tabID,
                      prevVisitID: (encryptedValues[.visitPrevID] as? String).flatMap(UUID.init(uuidString:)),
                      parentVisitID: (encryptedValues[.visitParentID] as? String).flatMap(UUID.init(uuidString:)),
-                     pinnedAt: encryptedValues[.visitPinnedAt] as? Date,
                      lastKnownRecordData: archiver.encodedData)
     }
 
@@ -215,7 +213,6 @@ private extension CKRecord {
         encryptedValues[.visitTabID] = visit.tabID.uuidString
         encryptedValues[.visitPrevID] = visit.prevVisitID?.uuidString
         encryptedValues[.visitParentID] = visit.parentVisitID?.uuidString
-        encryptedValues[.visitPinnedAt] = visit.pinnedAt
     }
 
     /// 저장해 둔 시스템 필드로 레코드를 되살린다. 실패하면 nil.

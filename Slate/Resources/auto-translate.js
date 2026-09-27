@@ -17,6 +17,11 @@
   var written = new WeakMap();
   // 요소 → { 속성명: 우리가 써넣은 값 }
   var writtenAttr = new WeakMap();
+  // 번역을 써넣은 자리와 그 원문. 원문 보기가 이 표로 되돌리고 다시 덧씌운다.
+  var swapped = new Map();       // node → { original, translated }
+  var swappedAttr = new Map();   // el → { attr: { original, translated } }
+  var SWAPPED_PRUNE_AT = 5000;
+  var showingOriginal = false;
   // 왕복 중. id → { node, text } 또는 { el, attr, text }
   var pending = new Map();
   // 원문 → 번역. 같은 문장은 왕복 없이 바꾼다.
@@ -38,8 +43,14 @@
     return { lead: m[1], core: m[2], trail: m[3] };
   }
 
+  // 번역을 써넣는다. 원문 보기 중이면 써넣지 않고 기억만 해 두고, 끄면 그때 덧씌운다.
   function write(node, lead, text, trail) {
     var value = lead + text + trail;
+    swapped.set(node, { original: node.nodeValue, translated: value });
+    if (showingOriginal) {
+      written.set(node, node.nodeValue);
+      return;
+    }
     written.set(node, value);
     node.nodeValue = value;
   }
@@ -50,8 +61,53 @@
       map = {};
       writtenAttr.set(el, map);
     }
+    var entry = swappedAttr.get(el);
+    if (!entry) {
+      entry = {};
+      swappedAttr.set(el, entry);
+    }
+    entry[attr] = { original: el.getAttribute(attr), translated: text };
+    if (showingOriginal) {
+      map[attr] = el.getAttribute(attr);
+      return;
+    }
     map[attr] = text;
     el.setAttribute(attr, text);
+  }
+
+  // 원문 ↔ 번역을 제자리에서 바꾼다. 사이트가 그 사이 글자를 갈았으면 그 자리는 건드리지 않는다.
+  window.__slateShowOriginal = function (flag) {
+    flag = !!flag;
+    if (flag === showingOriginal) return;
+    showingOriginal = flag;
+    swapped.forEach(function (pair, node) {
+      if (!node.isConnected) { swapped.delete(node); return; }
+      var current = flag ? pair.translated : pair.original;
+      if (node.nodeValue !== current) return;
+      var next = flag ? pair.original : pair.translated;
+      written.set(node, next);
+      node.nodeValue = next;
+    });
+    swappedAttr.forEach(function (entry, el) {
+      if (!el.isConnected) { swappedAttr.delete(el); return; }
+      var map = writtenAttr.get(el) || {};
+      Object.keys(entry).forEach(function (attr) {
+        var pair = entry[attr];
+        var current = flag ? pair.translated : pair.original;
+        if (el.getAttribute(attr) !== current) return;
+        var next = flag ? pair.original : pair.translated;
+        map[attr] = next;
+        el.setAttribute(attr, next);
+      });
+      writtenAttr.set(el, map);
+    });
+    if (!flag) schedule();   // 원문을 보는 동안 미뤄 둔 새 글자를 이어서 번역한다
+  };
+
+  function pruneSwapped() {
+    if (swapped.size < SWAPPED_PRUNE_AT) return;
+    swapped.forEach(function (pair, node) { if (!node.isConnected) swapped.delete(node); });
+    swappedAttr.forEach(function (entry, el) { if (!el.isConnected) swappedAttr.delete(el); });
   }
 
   function acceptable(node) {
@@ -165,6 +221,8 @@
   function run() {
     timer = null;
     if (document.hidden) return;   // 돌아오면 visibilitychange가 다시 돌린다
+    if (showingOriginal) return;   // 원문 보기를 끄면 다시 돌린다
+    pruneSwapped();
     var batch = collect();
     send(batch);
     // 한 묶음 상한에 걸렸으면 남은 것을 이어서 모은다.
@@ -177,7 +235,7 @@
   }
 
   document.addEventListener("visibilitychange", function () {
-    if (!document.hidden && (dirty.size || fullScan)) schedule();
+    if (!document.hidden && !showingOriginal && (dirty.size || fullScan)) schedule();
   });
 
   window.__slateApplyTranslations = function (items) {

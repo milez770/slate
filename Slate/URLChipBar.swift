@@ -193,7 +193,7 @@ struct URLPart: Identifiable, Equatable {
     }
 
     /// 두 주소가 쪽 넘김 관계인가 — 같은 호스트에서 경로의 숫자 덩어리만 다르거나,
-    /// 경로는 같고 쿼리·#만 다른 이동. 붙박이 탭이 제자리 이동을 허락하는 기준이다.
+    /// 경로는 같고 쿼리·#만 다른 이동. 고정 탭이 제자리 이동을 허락하는 기준이다.
     static func isPaginationMove(from current: URL, to target: URL) -> Bool {
         guard let a = URLComponents(url: current, resolvingAgainstBaseURL: false),
               let b = URLComponents(url: target, resolvingAgainstBaseURL: false),

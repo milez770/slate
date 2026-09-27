@@ -118,6 +118,50 @@ final class AutoTranslateTests: XCTestCase {
         XCTAssertTrue(rest.isEmpty)
     }
 
+    /// 원문 보기: 번역된 글자를 제자리에서 원문으로 되돌리고, 그동안 새 글자는 번역하지 않다가
+    /// 끄면 번역으로 돌아오며 미뤄 둔 글자도 이어서 모은다.
+    func testShowOriginalSwapsInPlaceAndPausesTranslation() async throws {
+        let h = harness()
+        await h.load(page)
+        let items = try await pending(h)
+        let all = items.map { "{\"id\":\($0["id"] as! Int),\"text\":\"번역\"}" }.joined(separator: ",")
+        _ = try await h.eval("window.__slateApplyTranslations([\(all)]); 1")
+        _ = try await h.eval("window.__slateShowOriginal(true); 1")
+        let original = try await h.eval("document.getElementById('ja').textContent") as? String
+        XCTAssertEqual(original, "こんにちは")
+        let mixed = try await h.eval("document.getElementById('mixed').firstChild.nodeValue") as? String
+        XCTAssertEqual(mixed, "  今日は", "앞 공백까지 원문 그대로")
+        _ = try await h.eval("""
+            var d = document.createElement('div'); d.id = 'late'; d.textContent = 'あとから'; document.body.appendChild(d); 1
+        """)
+        try await Task.sleep(for: .milliseconds(600))
+        let paused = try await pending(h)
+        XCTAssertTrue(paused.isEmpty, "원문을 보는 동안은 새 글자를 보내지 않는다")
+        let stillJa = try await h.eval("document.getElementById('ja').textContent") as? String
+        XCTAssertEqual(stillJa, "こんにちは", "되돌린 글자를 다시 모아 번역하지 않는다")
+        _ = try await h.eval("window.__slateShowOriginal(false); 1")
+        let back = try await h.eval("document.getElementById('ja').textContent") as? String
+        XCTAssertEqual(back, "번역")
+        try await Task.sleep(for: .milliseconds(600))
+        let resumed = texts(try await pending(h))
+        XCTAssertEqual(resumed, ["あとから"], "끄면 미뤄 둔 글자를 이어서 모은다")
+    }
+
+    /// 원문 보기 중에 도착한 번역은 써넣지 않고 기억해 두다가 끄면 나타난다.
+    func testTranslationArrivingWhileShowingOriginalAppearsLater() async throws {
+        let h = harness()
+        await h.load(page)
+        let items = try await pending(h)
+        _ = try await h.eval("window.__slateShowOriginal(true); 1")
+        let all = items.map { "{\"id\":\($0["id"] as! Int),\"text\":\"번역\"}" }.joined(separator: ",")
+        _ = try await h.eval("window.__slateApplyTranslations([\(all)]); 1")
+        let during = try await h.eval("document.getElementById('ja').textContent") as? String
+        XCTAssertEqual(during, "こんにちは")
+        _ = try await h.eval("window.__slateShowOriginal(false); 1")
+        let after = try await h.eval("document.getElementById('ja').textContent") as? String
+        XCTAssertEqual(after, "번역")
+    }
+
     func testHanOnlyTextIsChineseUnlessPageHasKana() async throws {
         let h = harness()
         await h.load("<html><body><p>漢字</p><p>中文内容</p><p>Hello</p></body></html>")

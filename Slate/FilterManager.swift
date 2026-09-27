@@ -28,6 +28,21 @@ final class FilterManager {
         return result.safariRulesJSON
     }
 
+    /// 요소 숨김(css-display-none) 규칙을 뺀 JSON. 광고 요청은 그대로 막고, 광고 차단 감지용
+    /// 미끼 요소는 숨기지 않아 감지를 통과한다.
+    nonisolated static func stripCosmeticRules(_ json: String) throws -> String {
+        guard let data = json.data(using: .utf8),
+              let rules = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return json }
+        let kept = rules.filter { rule in
+            (rule["action"] as? [String: Any])?["type"] as? String != "css-display-none"
+        }
+        let out = try JSONSerialization.data(withJSONObject: kept)
+        return String(decoding: out, as: UTF8.self)
+    }
+
+    /// 감지 회피용 목록의 저장 식별자 접미사. 전체 목록과 따로 컴파일·캐시된다.
+    private static let networkSuffix = "-network"
+
     private func filterText(name: String) -> String? {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         if let downloaded = try? String(contentsOf: dir.appendingPathComponent("\(name).txt"), encoding: .utf8) {
@@ -45,33 +60,51 @@ final class FilterManager {
     }
 
     func loadRuleLists() async -> [WKContentRuleList] {
+        await load(suffix: "") { $0 }
+    }
+
+    /// 요소 숨김 규칙을 뺀 목록. "감지 회피" 사이트가 처음 나올 때 컴파일하고 이후는 저장소 캐시.
+    func loadNetworkOnlyRuleLists() async -> [WKContentRuleList] {
+        await load(suffix: Self.networkSuffix) { try Self.stripCosmeticRules($0) }
+    }
+
+    private func load(suffix: String,
+                      transform: @escaping @Sendable (String) throws -> String) async -> [WKContentRuleList] {
         var lists: [WKContentRuleList] = []
         let store = WKContentRuleListStore.default()!
         for name in Self.bundledFilters {
-            if let cached = try? await store.contentRuleList(forIdentifier: name) {
+            let identifier = name + suffix
+            if let cached = try? await store.contentRuleList(forIdentifier: identifier) {
                 lists.append(cached)
                 continue
             }
             guard let text = filterText(name: name) else {
-                Self.logger.error("loadRuleLists(\(name, privacy: .public)): no filter text available")
+                Self.logger.error("load(\(identifier, privacy: .public)): no filter text available")
                 continue
             }
             let json: String
             do {
                 json = try await Task.detached(priority: .userInitiated) {
-                    try Self.convert(filterText: text)
+                    try transform(Self.convert(filterText: text))
                 }.value
             } catch {
-                Self.logger.error("loadRuleLists(\(name, privacy: .public)): conversion failed")
+                Self.logger.error("load(\(identifier, privacy: .public)): conversion failed")
                 continue
             }
-            guard let compiled = try? await store.compileContentRuleList(forIdentifier: name, encodedContentRuleList: json) else {
-                Self.logger.error("loadRuleLists(\(name, privacy: .public)): compile failed")
+            guard let compiled = try? await store.compileContentRuleList(forIdentifier: identifier,
+                                                                          encodedContentRuleList: json) else {
+                Self.logger.error("load(\(identifier, privacy: .public)): compile failed")
                 continue
             }
             lists.append(compiled)
         }
         return lists
+    }
+
+    /// 목록 이름 하나의 컴파일 캐시(전체·감지 회피)를 지운다. 필터 본문이 바뀌면 둘 다 다시 컴파일해야 한다.
+    private func removeCompiled(_ name: String, from store: WKContentRuleListStore) async {
+        try? await store.removeContentRuleList(forIdentifier: name)
+        try? await store.removeContentRuleList(forIdentifier: name + Self.networkSuffix)
     }
 
     func refresh() async throws {
@@ -95,7 +128,7 @@ final class FilterManager {
                     throw URLError(.badServerResponse)
                 }
                 try data.write(to: dir.appendingPathComponent("\(name).txt"), options: .atomic)
-                try? await store.removeContentRuleList(forIdentifier: name)
+                await removeCompiled(name, from: store)
             } catch {
                 Self.logger.error("refresh(\(name, privacy: .public)): download/write failed: \(error.localizedDescription, privacy: .public)")
                 throw error
@@ -112,7 +145,7 @@ final class FilterManager {
         let store = WKContentRuleListStore.default()!
         for name in Self.bundledFilters {
             try? FileManager.default.removeItem(at: dir.appendingPathComponent("\(name).txt"))
-            try? await store.removeContentRuleList(forIdentifier: name)
+            await removeCompiled(name, from: store)
         }
         UserDefaults.standard.removeObject(forKey: "slate.filters.updated")
         _ = await loadRuleLists()

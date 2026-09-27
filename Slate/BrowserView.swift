@@ -242,6 +242,13 @@ struct BrowserView: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
+                if let detail = tab.loadErrorDetail {
+                    Text(detail)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.tertiary)
+                        .multilineTextAlignment(.center)
+                        .textSelection(.enabled)
+                }
                 Button { tab.retryLoad() } label: {
                     Text("다시 시도")
                         .font(.subheadline.weight(.semibold))
@@ -452,22 +459,26 @@ struct BrowserView: View {
         addressFocused = false
     }
 
+    /// 주소창·접힌 바에 붙는 상태 표시. 고정, 광고 차단 방식 변경, 원문 보기 순.
+    private var statusBadges: [String] {
+        var badges: [String] = []
+        if tab.sticky { badges.append("pin.fill") }
+        if store.blockingModes.mode(for: tab.lastURL) != .full { badges.append("shield.slash.fill") }
+        if tab.showingOriginal { badges.append("character.book.closed.fill") }
+        return badges
+    }
+
+    private func badge(_ symbol: String, size: CGFloat, box: CGFloat) -> some View {
+        Image(systemName: symbol)
+            .font(.system(size: size, weight: .bold))
+            .foregroundStyle(.black)
+            .frame(width: box, height: box)
+            .background(Color.keyGreen, in: Circle())
+    }
+
     private var collapsedBar: some View {
         HStack(spacing: 5) {
-            if tab.sticky {
-                Image(systemName: "arrow.triangle.branch")
-                    .font(.system(size: 9, weight: .bold))
-                    .foregroundStyle(.black)
-                    .frame(width: 15, height: 15)
-                    .background(Color.keyGreen, in: Circle())
-            }
-            if currentVisit?.pinnedAt != nil {
-                Image(systemName: "pin.fill")
-                    .font(.system(size: 8, weight: .bold))
-                    .foregroundStyle(.black)
-                    .frame(width: 15, height: 15)
-                    .background(Color.keyGreen, in: Circle())
-            }
+            ForEach(statusBadges, id: \.self) { badge($0, size: 8, box: 15) }
             Text(hostDisplay(tab.lastURL))
                 .font(.footnote)
                 .foregroundStyle(.secondary)
@@ -497,26 +508,15 @@ struct BrowserView: View {
     private var addressCapsule: some View {
         HStack(spacing: 0) {
             // 오른쪽 새로고침 버튼이 차지하는 만큼 왼쪽에도 여백을 둬 주소가 가운데 오게 한다.
-            // 붙박이·고정이 켜져 있으면 그 여백 자리에 상태 아이콘이 선다.
+            // 상태 표시가 있으면 그 여백 자리에 아이콘이 선다.
             HStack(spacing: 3) {
-                if !addressFocused, tab.sticky {
-                    Image(systemName: "arrow.triangle.branch")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(.black)
-                        .frame(width: 18, height: 18)
-                        .background(Color.keyGreen, in: Circle())
-                }
-                if !addressFocused, currentVisit?.pinnedAt != nil {
-                    Image(systemName: "pin.fill")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundStyle(.black)
-                        .frame(width: 18, height: 18)
-                        .background(Color.keyGreen, in: Circle())
+                if !addressFocused {
+                    ForEach(statusBadges, id: \.self) { badge($0, size: 9, box: 18) }
                 }
             }
             .frame(minWidth: 16)
             .frame(height: barButtonSize)
-            .padding(.leading, (tab.sticky || currentVisit?.pinnedAt != nil) && !addressFocused ? 10 : 0)
+            .padding(.leading, !statusBadges.isEmpty && !addressFocused ? 10 : 0)
             AddressField(
                 text: $addressText,
                 isFocused: $addressFocused,
@@ -553,14 +553,6 @@ struct BrowserView: View {
         .onTapGesture { addressFocused = true }
     }
 
-    /// 지금 보는 페이지의 방문. 고정 메뉴가 이걸 붙든다.
-    private var currentVisit: Visit? {
-        guard let url = tab.lastURL,
-              let visit = store.history.lastVisit(tabID: tab.id),
-              HistoryStore.stripFragment(visit.url) == HistoryStore.stripFragment(url) else { return nil }
-        return visit
-    }
-
     /// 자주 쓰지 않는 조작은 여기 모은다.
     private var moreButton: some View {
         Menu {
@@ -570,20 +562,23 @@ struct BrowserView: View {
                 Label("공유", systemImage: "square.and.arrow.up")
             }
             .disabled(tab.lastURL == nil)
-            Button {
-                if let visit = currentVisit {
-                    store.history.setPinned(visit.pinnedAt == nil, id: visit.id)
+            Toggle(isOn: Binding(get: { tab.sticky }, set: { tab.sticky = $0; store.saveState() })) {
+                Label("이 탭 고정", systemImage: "pin")
+            }
+            Picker(selection: Binding(get: { store.blockingModes.mode(for: tab.lastURL) },
+                                      set: { store.setBlockingMode($0, for: tab) })) {
+                ForEach(BlockingMode.allCases, id: \.self) { mode in
+                    Text(mode.label).tag(mode)
                 }
             } label: {
-                if currentVisit?.pinnedAt != nil {
-                    Label("고정 해제", systemImage: "pin.slash")
-                } else {
-                    Label("고정", systemImage: "pin")
-                }
+                Label("이 사이트 광고 차단", systemImage: "shield")
             }
-            .disabled(currentVisit == nil)
-            Toggle(isOn: Binding(get: { tab.sticky }, set: { tab.sticky = $0; store.saveState() })) {
-                Label("이 탭 붙박이", systemImage: "arrow.triangle.branch")
+            .disabled(tab.lastURL == nil)
+            if store.autoTranslateEnabled {
+                Toggle(isOn: Binding(get: { tab.showingOriginal }, set: { tab.showingOriginal = $0 })) {
+                    Label("원문 보기", systemImage: "character.book.closed")
+                }
+                .disabled(tab.lastURL == nil)
             }
             Button {
                 enterFind()
@@ -758,7 +753,7 @@ private struct CardZoom<Chrome: View>: ViewModifier {
 }
 
 extension Color {
-    /// 앱 아이콘 배경색 #29FF6C. 붙박이·고정 표시와 로딩 게이지가 쓴다.
+    /// 앱 아이콘 배경색 #29FF6C. 고정 표시와 로딩 게이지가 쓴다.
     static let keyGreen = Color(red: 41 / 255, green: 255 / 255, blue: 108 / 255)
 }
 

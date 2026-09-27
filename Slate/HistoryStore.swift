@@ -12,8 +12,6 @@ struct Visit: Codable, Equatable, Identifiable {
     let tabID: UUID
     var prevVisitID: UUID?
     var parentVisitID: UUID?
-    /// 고정한 시각. nil이면 고정 안 됨. 타임라인 맨 위 선반에 이 순서로 놓인다.
-    var pinnedAt: Date?
     /// 서버가 마지막으로 준 레코드의 시스템 필드. 이걸 실어 보내야 CloudKit이 같은 레코드의
     /// 갱신으로 알아본다 — 없으면 매번 새 레코드를 만드는 셈이라 충돌로 거부된다.
     var lastKnownRecordData: Data?
@@ -157,19 +155,6 @@ final class HistoryStore {
         visits.removeAll { targets.contains($0.id) }
         SnapshotStore.shared.delete(ids)
         save()
-    }
-
-    /// 고정된 방문. 고정한 순서대로.
-    var pinned: [Visit] {
-        visits.filter { $0.pinnedAt != nil }.sorted { $0.pinnedAt! < $1.pinnedAt! }
-    }
-
-    /// 방문을 고정하거나 푼다.
-    func setPinned(_ on: Bool, id: UUID) {
-        guard let index = visits.firstIndex(where: { $0.id == id }) else { return }
-        visits[index].pinnedAt = on ? Date() : nil
-        save()
-        onLocalChange?([id], [])
     }
 
     /// 동기화 층이 올릴 레코드를 만들 때 쓴다.
