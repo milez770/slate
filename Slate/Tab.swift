@@ -211,15 +211,35 @@ final class Tab: Identifiable {
         ]
     }
 
+    /// 찍는 그림의 폭(포인트). 격자 카드 폭이면 충분하다 — 전체 화면 크기로 찍으면 탭마다
+    /// 12MB씩 쥔다.
+    nonisolated static let snapshotWidth: CGFloat = 200
+
     /// 지금 보이는 화면을 찍는다. 로드 완료 때 자동으로 부르고, 격자를 열 때도 한 번 더
     /// 부른다 — 스크롤·SPA 이동으로 화면이 달라졌어도 카드가 마지막 모습을 담게.
     func captureSnapshot() {
-        webView.takeSnapshot(with: nil) { [weak self] image, _ in
-            guard let image else { return }
+        let configuration = WKSnapshotConfiguration()
+        configuration.snapshotWidth = NSNumber(value: Double(Self.snapshotWidth))
+        webView.takeSnapshot(with: configuration) { [weak self] image, _ in
+            // 완료 블록은 메인 스레드에서 온다. 여기서 바로 복사해야 한다.
+            guard let image, let copy = Self.detached(image) else { return }
             Task { @MainActor in
-                self?.thumbnail = image
-                self?.onSnapshot?(image)
+                self?.thumbnail = copy
+                self?.onSnapshot?(copy)
             }
+        }
+    }
+
+    /// WebKit이 준 그림은 웹 프로세스와 나눠 쓰는 메모리(IOSurface)에 얹혀 있다. 뒤늦게 다른
+    /// 스레드에서 읽으면 이미 버려진 메모리를 건드려 죽는다 — 우리 소유의 비트맵으로 바로 복사한다.
+    nonisolated static func detached(_ image: UIImage) -> UIImage? {
+        let size = image.size
+        guard size.width > 0, size.height > 0 else { return nil }
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = image.scale
+        format.opaque = true
+        return UIGraphicsImageRenderer(size: size, format: format).image { _ in
+            image.draw(in: CGRect(origin: .zero, size: size))
         }
     }
 
