@@ -26,7 +26,7 @@ struct SettingsView: View {
                 Text("방문 \(store.history.visits.count)개 · history.json \(ByteCountFormatter.string(fromByteCount: Int64(store.history.fileSize), countStyle: .file))")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
-                Text("탭 \(store.tabs.count)개(살아 있는 페이지 \(store.liveTabCount)) · 앱이 더 쓸 수 있는 메모리 \(ByteCountFormatter.string(fromByteCount: Int64(os_proc_available_memory()), countStyle: .memory))")
+                Text("탭 \(store.tabs.count)개(살아 있는 페이지 \(store.liveTabCount)) · 앱이 쓰는 메모리 \(ByteCountFormatter.string(fromByteCount: Int64(processFootprint()), countStyle: .memory)) · 더 쓸 수 있는 메모리 \(ByteCountFormatter.string(fromByteCount: Int64(os_proc_available_memory()), countStyle: .memory))")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
@@ -40,6 +40,8 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
                 let stats = TranslationStats.shared
                 Text("요청 \(stats.requested) · 번역 \(stats.translated) · 실패 \(stats.failed) · 원장 적중 \(stats.cacheHits) · 대기 \(stats.queued) · 준비된 원어 \(stats.prepared.isEmpty ? "없음" : stats.prepared.joined(separator: ","))")
+                    .font(.caption2).foregroundStyle(.secondary)
+                Text("원장 \(TranslationCache.shared.count)항목 · translations.jsonl \(ByteCountFormatter.string(fromByteCount: Int64(TranslationCache.shared.fileSize), countStyle: .file))")
                     .font(.caption2).foregroundStyle(.secondary)
                 if !stats.lastError.isEmpty {
                     Text("마지막 오류: \(stats.lastError)").font(.caption2).foregroundStyle(.red)
@@ -195,4 +197,16 @@ struct SettingsView: View {
             lastUpdated = FilterManager.shared.lastUpdated
         }
     }
+}
+
+/// 지금 이 프로세스가 쥔 메모리(phys_footprint). iOS가 한도를 잴 때 보는 값.
+func processFootprint() -> Int {
+    var info = task_vm_info_data_t()
+    var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
+    let result = withUnsafeMutablePointer(to: &info) { pointer in
+        pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+            task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+        }
+    }
+    return result == KERN_SUCCESS ? Int(info.phys_footprint) : 0
 }
