@@ -11,10 +11,24 @@
     return path.replace(/[0-9]+/g, '#');
   }
 
+  // 경로 끝의 쪽 번호 꼬리(/page/2/, /page-2, /paged/3). 1쪽은 꼬리가 없고 2쪽부터 붙는
+  // 목록이 많아, 꼬리를 떼고 견주지 않으면 1쪽→2쪽이 딴 페이지로 보인다.
+  var PAGE_SUFFIX = /\/paged?[-_\/]?[0-9]+\/?$/i;
+
+  function hasPageMarker(url) {
+    if (PAGE_SUFFIX.test(url.pathname)) { return true; }
+    return /(^|&)paged?=[0-9]+(&|$)/i.test(url.search.slice(1));
+  }
+
+  function listShape(path) {
+    return maskDigits(path.replace(PAGE_SUFFIX, '').replace(/\/+$/, ''));
+  }
+
   function isPaginationMove(from, to) {
     if (from.host !== to.host) { return false; }
     if (from.pathname === to.pathname) { return true; }
-    return maskDigits(from.pathname) === maskDigits(to.pathname);
+    if (hasPageMarker(to)) { return true; }
+    return listShape(from.pathname) === listShape(to.pathname);
   }
 
   // 고정이 켜져 있고 raw가 다른 페이지 모양의 웹 주소면 그 URL, 아니면 null.

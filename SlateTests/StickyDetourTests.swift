@@ -16,6 +16,8 @@ final class StickyDetourTests: XCTestCase {
     <html><body>
       <a id="detail" href="/detail/123.html">상세</a>
       <a id="next" href="/list/2.html">다음 쪽</a>
+      <a id="page2" href="/albums/page/2/">목록 2쪽</a>
+      <a id="post" href="/nyako-88-photos-2/">글</a>
       <a id="ext" href="https://other.example/x">외부</a>
       <script>
         window.webkit = { messageHandlers: { slateStickyOpen: { postMessage: function (u) { window.__opened.push(u); } } } };
@@ -51,6 +53,18 @@ final class StickyDetourTests: XCTestCase {
         XCTAssertEqual(opened, 0)
         let saw = try await h.eval("JSON.stringify(window.__pageSaw)") as? String
         XCTAssertEqual(saw, "[\"next\"]", "쪽 넘김은 페이지가 그대로 처리한다")
+    }
+
+    /// 1쪽은 꼬리가 없고 2쪽부터 /page/N이 붙는 목록: 첫 화면에서 2쪽 링크는 제자리, 글은 새 탭.
+    func testPageSuffixLinkStaysInPlaceFromFirstPage() async throws {
+        let h = harness()
+        await load(h)
+        _ = try? await h.eval("history.replaceState(null, '', '/home1/'); 1")
+        _ = try await h.eval("document.getElementById('page2').click(); document.getElementById('post').click(); 1")
+        let opened = try await h.eval("JSON.stringify(window.__opened)") as? String
+        XCTAssertEqual(opened, "[\"https://site7.com/nyako-88-photos-2/\"]")
+        let saw = try await h.eval("JSON.stringify(window.__pageSaw)") as? String
+        XCTAssertEqual(saw, "[\"page2\"]")
     }
 
     func testExternalLinkAlsoDetours() async throws {

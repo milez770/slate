@@ -192,14 +192,34 @@ struct URLPart: Identifiable, Equatable {
         return last
     }
 
-    /// 두 주소가 쪽 넘김 관계인가 — 같은 호스트에서 경로의 숫자 덩어리만 다르거나,
-    /// 경로는 같고 쿼리·#만 다른 이동. 고정 탭이 제자리 이동을 허락하는 기준이다.
+    /// 두 주소가 쪽 넘김 관계인가 — 같은 호스트에서 경로는 같고 쿼리·#만 다르거나, 목표에
+    /// 쪽 번호 표시(/page/N 꼬리, ?page=N)가 있거나, 쪽 번호 꼬리를 뗀 경로가 숫자 덩어리만
+    /// 다른 이동. 고정 탭이 제자리 이동을 허락하는 기준이다. sticky-detour.js와 같은 규칙.
     static func isPaginationMove(from current: URL, to target: URL) -> Bool {
         guard let a = URLComponents(url: current, resolvingAgainstBaseURL: false),
               let b = URLComponents(url: target, resolvingAgainstBaseURL: false),
               a.host == b.host else { return false }
         if a.path == b.path { return true }
-        return maskDigits(a.path) == maskDigits(b.path)
+        if hasPageMarker(b) { return true }
+        return listShape(a.path) == listShape(b.path)
+    }
+
+    /// 경로 끝의 쪽 번호 꼬리: /page/2/, /page-2, /paged/3. 1쪽은 꼬리가 없고 2쪽부터 붙는
+    /// 목록이 많다.
+    private static let pageSuffix = #/\/paged?[-_\/]?[0-9]+\/?$/#.ignoresCase()
+
+    private static func hasPageMarker(_ components: URLComponents) -> Bool {
+        if components.path.contains(pageSuffix) { return true }
+        return components.queryItems?.contains { item in
+            ["page", "paged"].contains(item.name.lowercased()) && Int(item.value ?? "") != nil
+        } ?? false
+    }
+
+    /// 쪽 번호 꼬리와 끝 슬래시를 떼고 숫자를 뭉갠 경로. 목록 모양 비교용.
+    private static func listShape(_ path: String) -> String {
+        var stripped = path.replacing(pageSuffix, with: "")
+        while stripped.hasSuffix("/") { stripped.removeLast() }
+        return maskDigits(stripped)
     }
 
     /// 숫자 덩어리를 전부 #으로 뭉갠 경로. 모양 비교용.
