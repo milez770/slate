@@ -22,6 +22,9 @@ struct SettingsView: View {
                 Text("방문 기록이 내 iCloud 계정에 저장돼 기기 사이를 오간다. 주소와 제목은 기기에서 암호화해 올린다. 로그인 상태(쿠키)는 올리지 않는다.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                Text("방문 \(store.history.visits.count)개 · history.json \(ByteCountFormatter.string(fromByteCount: Int64(store.history.fileSize), countStyle: .file))")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
             Section("번역") {
                 Toggle("일본어·중국어 자동 번역", isOn: Binding(

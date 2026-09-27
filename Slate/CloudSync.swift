@@ -7,6 +7,7 @@ import os
 /// 기기에서 암호화되고, 고급 데이터 보호를 켠 계정에서는 종단간 암호화가 된다.
 ///
 /// 로컬 저장은 그대로 history.json이다. 이 층은 변경분을 올리고 내려받아 원장에 반영만 한다.
+/// 레코드의 시스템 필드는 HistoryStore가 방문별 파일(history-records/)로 들고 있다.
 @MainActor
 final class CloudSync: NSObject {
     static let shared = CloudSync()
@@ -186,8 +187,8 @@ extension CKRecord.FieldKey {
 }
 
 private extension CKRecord {
-    /// 서버 레코드를 방문으로 옮긴다. 주소나 날짜가 없으면 우리가 쓴 레코드가 아니다.
-    func toVisit() -> Visit? {
+    /// 서버 레코드를 방문과 시스템 필드로 옮긴다. 주소나 날짜가 없으면 우리가 쓴 레코드가 아니다.
+    func toVisit() -> (visit: Visit, systemFields: Data)? {
         guard let id = UUID(uuidString: recordID.recordName),
               let raw = encryptedValues[.visitURL] as? String,
               let url = URL(string: raw),
@@ -196,14 +197,14 @@ private extension CKRecord {
               let tabID = UUID(uuidString: tabRaw) else { return nil }
         let archiver = NSKeyedArchiver(requiringSecureCoding: true)
         encodeSystemFields(with: archiver)
-        return Visit(id: id,
-                     date: date,
-                     url: url,
-                     title: encryptedValues[.visitTitle] as? String,
-                     tabID: tabID,
-                     prevVisitID: (encryptedValues[.visitPrevID] as? String).flatMap(UUID.init(uuidString:)),
-                     parentVisitID: (encryptedValues[.visitParentID] as? String).flatMap(UUID.init(uuidString:)),
-                     lastKnownRecordData: archiver.encodedData)
+        let visit = Visit(id: id,
+                          date: date,
+                          url: url,
+                          title: encryptedValues[.visitTitle] as? String,
+                          tabID: tabID,
+                          prevVisitID: (encryptedValues[.visitPrevID] as? String).flatMap(UUID.init(uuidString:)),
+                          parentVisitID: (encryptedValues[.visitParentID] as? String).flatMap(UUID.init(uuidString:)))
+        return (visit, archiver.encodedData)
     }
 
     func fill(from visit: Visit) {
@@ -269,7 +270,7 @@ extension CloudSync: CKSyncEngineDelegate {
                     syncEngine.state.remove(pendingRecordZoneChanges: [.saveRecord(recordID)])
                     return nil
                 }
-                let record = visit.lastKnownRecordData.flatMap(CKRecord.fromSystemFields)
+                let record = self.history.recordData(for: visitID).flatMap(CKRecord.fromSystemFields)
                     ?? CKRecord(recordType: Self.visitRecordType, recordID: recordID)
                 record.fill(from: visit)
                 return record
@@ -279,7 +280,7 @@ extension CloudSync: CKSyncEngineDelegate {
 
     private func handleFetched(_ event: CKSyncEngine.Event.FetchedRecordZoneChanges) {
         Self.logger.log("받음: 변경 \(event.modifications.count) 삭제 \(event.deletions.count)")
-        var incoming: [Visit] = []
+        var incoming: [(visit: Visit, systemFields: Data)] = []
         for modification in event.modifications {
             let record = modification.record
             if record.recordType == Self.rulesRecordType {
@@ -289,12 +290,15 @@ extension CloudSync: CKSyncEngineDelegate {
                 let archiver = NSKeyedArchiver(requiringSecureCoding: true)
                 record.encodeSystemFields(with: archiver)
                 ruleRecordMeta[host] = archiver.encodedData
-            } else if let visit = record.toVisit() {
-                incoming.append(visit)
+            } else if let fetched = record.toVisit() {
+                incoming.append(fetched)
             }
         }
         saveRuleMeta()
-        history.mergeFromServer(incoming)
+        history.mergeFromServer(incoming.map(\.visit))
+        for fetched in incoming {
+            history.setLastKnownRecord(fetched.systemFields, forVisit: fetched.visit.id)
+        }
         var deletedVisits: [UUID] = []
         for deletion in event.deletions {
             if let host = Self.host(fromRecordName: deletion.recordID.recordName) {
@@ -338,8 +342,9 @@ extension CloudSync: CKSyncEngineDelegate {
                         serverRecord.encodeSystemFields(with: archiver)
                         ruleRecordMeta[host] = archiver.encodedData
                         saveRuleMeta()
-                    } else if let visit = serverRecord.toVisit() {
-                        history.mergeFromServer([visit])
+                    } else if let fetched = serverRecord.toVisit() {
+                        history.mergeFromServer([fetched.visit])
+                        history.setLastKnownRecord(fetched.systemFields, forVisit: fetched.visit.id)
                     }
                 }
             case .zoneNotFound:

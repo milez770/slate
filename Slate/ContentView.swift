@@ -67,6 +67,8 @@ struct ContentView: View {
             if scenePhase == .background {
                 store.saveState()
                 store.saveInteractionStates()
+                // 방문 기록은 모아 쓰기라 마지막 몇 초가 아직 파일에 없을 수 있다 — 지금 쓴다.
+                Task { await store.history.flush() }
             }
         }
         .onChange(of: store.showingGrid) { _, showing in

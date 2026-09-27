@@ -93,18 +93,85 @@ final class HistoryStoreTests: XCTestCase {
         XCTAssertTrue(store.visits.isEmpty)
     }
 
-    @MainActor func testPersistenceRoundtrip() {
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("slate-history-roundtrip-\(UUID().uuidString).json")
+    /// 시험마다 다른 폴더를 쓴다 — history.json 옆의 history-records/까지 격리하기 위해.
+    private func isolatedFileURL(_ name: String = #function) -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("slate-history-\(name)-\(UUID().uuidString)", isDirectory: true)
+        try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("history.json")
+    }
+
+    @MainActor func testPersistenceRoundtrip() async {
+        let url = isolatedFileURL()
         let a = HistoryStore(fileURL: url)
         let tab = UUID()
         a.record(url: URL(string: "https://a.example")!, tabID: tab)
         a.updateTitle("에이", url: URL(string: "https://a.example")!, tabID: tab)
+        await a.flush()
 
         let b = HistoryStore(fileURL: url)
         XCTAssertEqual(b.visits.count, 1)
         XCTAssertEqual(b.visits[0].title, "에이")
         XCTAssertEqual(b.visits[0].tabID, tab)
+    }
+
+    /// 방문마다 원장 전체를 다시 쓰지 않는다 — 모아서 잠시 뒤에 쓰고, 백그라운드 진입 때는 바로 쓴다.
+    @MainActor func testSaveIsDeferredUntilFlushOrDelay() async throws {
+        let url = isolatedFileURL()
+        let a = HistoryStore(fileURL: url)
+        a.record(url: URL(string: "https://a.example")!, tabID: UUID())
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path), "기록 직후에는 아직 파일이 없다")
+        await a.flush()
+        XCTAssertEqual(HistoryStore(fileURL: url).visits.count, 1, "flush는 바로 쓴다")
+        a.record(url: URL(string: "https://b.example")!, tabID: UUID())
+        try await Task.sleep(for: .milliseconds(1500))
+        XCTAssertEqual(HistoryStore(fileURL: url).visits.count, 2, "가만히 두면 잠시 뒤 스스로 쓴다")
+    }
+
+    /// CloudKit 시스템 필드는 history.json 밖의 방문별 파일에 산다.
+    @MainActor func testRecordDataLivesBesideHistoryNotInside() async throws {
+        let url = isolatedFileURL()
+        let a = HistoryStore(fileURL: url)
+        let visit = a.record(url: URL(string: "https://a.example")!, tabID: UUID())!
+        let blob = Data([1, 2, 3, 4])
+        a.setLastKnownRecord(blob, forVisit: visit.id)
+        XCTAssertEqual(a.recordData(for: visit.id), blob)
+        await a.flush()
+        let json = try String(contentsOf: url, encoding: .utf8)
+        XCTAssertFalse(json.contains(blob.base64EncodedString()), "history.json에는 시스템 필드가 없다")
+        XCTAssertFalse(json.contains("lastKnownRecordData"))
+        XCTAssertEqual(HistoryStore(fileURL: url).recordData(for: visit.id), blob, "다시 열어도 파일에서 읽는다")
+        a.setLastKnownRecord(nil, forVisit: visit.id)
+        XCTAssertNil(a.recordData(for: visit.id))
+    }
+
+    @MainActor func testRemoveDeletesRecordData() {
+        let a = HistoryStore(fileURL: isolatedFileURL())
+        let visit = a.record(url: URL(string: "https://a.example")!, tabID: UUID())!
+        a.setLastKnownRecord(Data([9]), forVisit: visit.id)
+        a.remove(visit)
+        XCTAssertNil(a.recordData(for: visit.id))
+    }
+
+    /// 옛 history.json(방문 안에 lastKnownRecordData가 든 형식)은 읽자마자 필드를 쓸 수 있고,
+    /// 배경에서 파일로 옮긴 뒤 가벼운 형식으로 다시 쓴다.
+    @MainActor func testLegacyRecordDataIsReadThenMigrated() async throws {
+        let url = isolatedFileURL()
+        let id = UUID(), tab = UUID()
+        let blob = Data([7, 7, 7])
+        let legacy = """
+        [{"id":"\(id.uuidString)","date":0,"url":"https://a.example/","tabID":"\(tab.uuidString)",
+          "lastKnownRecordData":"\(blob.base64EncodedString())"}]
+        """
+        try legacy.write(to: url, atomically: true, encoding: .utf8)
+        let a = HistoryStore(fileURL: url)
+        XCTAssertEqual(a.visits.count, 1)
+        XCTAssertEqual(a.recordData(for: id), blob, "옮기기 전에도 읽힌다")
+        try await Task.sleep(for: .milliseconds(1800))
+        let recordFile = url.deletingLastPathComponent().appendingPathComponent("history-records/\(id.uuidString)")
+        XCTAssertEqual(try Data(contentsOf: recordFile), blob, "파일로 옮겨졌다")
+        let json = try String(contentsOf: url, encoding: .utf8)
+        XCTAssertFalse(json.contains("lastKnownRecordData"), "history.json은 가벼운 형식으로 다시 씌었다")
     }
 
     // MARK: - 카드 접기 (runs)
