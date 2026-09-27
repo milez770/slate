@@ -9,3 +9,6 @@ fastlane/README.md
 # 로컬 젬 설치 경로
 vendor/bundle/
 .bundle/
+
+# 개인 세션 지침
+CLAUDE.local.md
