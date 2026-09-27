@@ -15,6 +15,36 @@ final class BrowserCoordinator: NSObject, WKUIDelegate, WKNavigationDelegate {
     var shouldDetourToNewTab: (@MainActor (URL) -> Bool)?
     /// 메인 프레임이 이 주소로 이동하기 직전. 사이트별 차단 방식을 갈아 끼우는 데 쓴다.
     var onMainFrameNavigation: (@MainActor (URL) -> Void)?
+    /// 클릭을 가로채 광고로 보내는 이동을 끊고 누른 링크로 되돌렸다. 인자는 끊은 광고 주소.
+    var onHijackRecovered: (@MainActor (URL) -> Void)?
+
+    /// 사용자가 마지막으로 누른 앵커. popup-guard.js가 클릭 처리가 끝난 뒤 보낸다.
+    struct ClickIntent {
+        let url: URL
+        /// 페이지 핸들러가 그 앵커의 기본 이동을 막았나. 막았으면 링크 대신 딴 데로 보내려는 것이다.
+        let prevented: Bool
+        let time: Date
+    }
+
+    private var lastClickIntent: ClickIntent?
+
+    func noteClickIntent(_ url: URL, prevented: Bool) {
+        lastClickIntent = ClickIntent(url: url, prevented: prevented, time: Date())
+    }
+
+    func recentClickIntent(within seconds: TimeInterval) -> ClickIntent? {
+        guard let intent = lastClickIntent, Date().timeIntervalSince(intent.time) < seconds else { return nil }
+        return intent
+    }
+
+    /// 클릭 가로채기인가 — 사용자가 같은 사이트 앵커를 눌렀는데 핸들러가 기본 이동을 막고 스크립트로
+    /// 딴 사이트(광고)로 보내는 이동. 앵커가 가리키던 주소로 되돌린다.
+    nonisolated static func shouldRecoverHijack(type: WKNavigationType, target: URL, current: URL?,
+                                                intent: ClickIntent?) -> Bool {
+        guard type == .other, let intent, intent.prevented, intent.url != target,
+              isCrossSite(target, current: current), !isCrossSite(intent.url, current: current) else { return false }
+        return true
+    }
 
     /// 번역을 요청해 온 하위 프레임. 원문 보기 토글을 이 프레임들에도 보낸다. 문서가 갈리면 비운다.
     private(set) var translationFrames: [WKFrameInfo] = []
@@ -116,6 +146,22 @@ final class BrowserCoordinator: NSObject, WKUIDelegate, WKNavigationDelegate {
            Self.shouldBlockNavigation(type: navigationAction.navigationType, target: url,
                                       current: webView.url, adIntentAge: adIntentAge) {
             decisionHandler(.cancel)
+            return
+        }
+        // 클릭 가로채기: 누른 링크 대신 광고로 보내는 이동은 끊고 누른 링크로 간다.
+        if navigationAction.targetFrame?.isMainFrame == true,
+           let url = navigationAction.request.url,
+           let intent = recentClickIntent(within: 2),
+           Self.shouldRecoverHijack(type: navigationAction.navigationType, target: url,
+                                    current: webView.url, intent: intent) {
+            lastClickIntent = nil
+            decisionHandler(.cancel)
+            onHijackRecovered?(url)
+            if shouldDetourToNewTab?(intent.url) == true {
+                onOpenInNewTab?(intent.url)
+            } else {
+                webView.load(URLRequest(url: intent.url))
+            }
             return
         }
         // 고정 탭: 사용자가 일으킨 이동이 다른 페이지 모양이면 새 탭으로 돌리고 이 페이지는
@@ -346,6 +392,10 @@ extension BrowserCoordinator: WKScriptMessageHandler {
         case "slateStickyOpen":
             if let raw = message.body as? String, let url = URL(string: raw) {
                 onOpenInNewTab?(url)
+            }
+        case "slateClickIntent":
+            if let body = message.body as? [String: Any], let raw = body["href"] as? String, let url = URL(string: raw) {
+                noteClickIntent(url, prevented: body["prevented"] as? Bool ?? false)
             }
         case "slateTranslate":
             guard let items = message.body as? [[String: Any]], let webView = message.webView else { return }

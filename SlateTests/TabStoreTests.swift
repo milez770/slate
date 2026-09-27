@@ -97,6 +97,40 @@ final class TabStoreTests: XCTestCase {
         XCTAssertEqual(tab.lastURL?.host, "a.example", "주소창은 원래 페이지")
     }
 
+    /// 차단기가 광고 이동을 막았을 때 방금 누른 같은 사이트 링크가 있으면 그 링크로 간다.
+    /// 고정 탭이면 새 탭으로.
+    @MainActor func testBlockedAdRedirectFollowsTappedLink() async throws {
+        let store = TabStore(defaults: UserDefaults(suiteName: #function)!)
+        store.newTab()
+        let tab = store.tabs[0]
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        tab.webView.frame = window.bounds
+        window.addSubview(tab.webView)
+        window.isHidden = false
+        tab.webView.loadHTMLString("<p>A</p>", baseURL: URL(string: "https://a.example/")!)
+        try await waitUntil { !tab.webView.isLoading && tab.webView.url?.host == "a.example" }
+        let ad = URL(string: "https://ads.example/land")!
+        let detail = URL(string: "https://a.example/detail/1")!
+        let error = NSError(domain: "WebKitErrorDomain", code: 104,
+                            userInfo: [NSURLErrorFailingURLErrorKey: ad, NSLocalizedDescriptionKey: "차단"])
+
+        tab.coordinator.noteClickIntent(detail, prevented: true)
+        tab.coordinator.onFail?(error)
+        XCTAssertNil(tab.loadError)
+        XCTAssertEqual(tab.blockedURL, ad)
+        XCTAssertTrue(tab.blockedRecovered)
+        try await waitUntil { tab.webView.url?.path == "/detail/1" }
+        // 시험 환경엔 네트워크가 없어 그 로드는 실패하고 주소는 원래 페이지로 돌아온다.
+        try await waitUntil { !tab.webView.isLoading && tab.webView.url?.path == "/" }
+
+        tab.sticky = true
+        var opened: URL?
+        tab.coordinator.onOpenInNewTab = { opened = $0 }
+        tab.coordinator.noteClickIntent(detail, prevented: true)
+        tab.coordinator.onFail?(error)
+        XCTAssertEqual(opened, detail, "고정 탭이면 누른 링크를 새 탭으로")
+    }
+
     /// "차단 없이 열기"는 그 로드 한 번만 규칙을 빼고, 문서가 커밋되면 사이트 설정대로 되돌린다.
     @MainActor func testBypassLoadSkipsRulesUntilCommit() {
         let store = TabStore(defaults: UserDefaults(suiteName: #function)!)

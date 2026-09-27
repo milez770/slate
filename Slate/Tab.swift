@@ -60,9 +60,21 @@ final class Tab: Identifiable {
     /// 실패의 오류 도메인·코드·실패 주소. 오류 화면 아래에 작게 띄운다 — 사유 문장만으로는
     /// 차단기·네트워크·WebKit 중 어디서 난 실패인지 알 수 없다.
     var loadErrorDetail: String?
-    /// 콘텐츠 차단기가 막은 이동의 주소. 페이지가 떠 있으면 오류 화면 대신 띠로 알리고 몇 초 뒤
-    /// 지운다. 빈 탭이면 오류 화면에 "차단 없이 열기"를 붙이는 근거가 된다.
+    /// 막은 이동의 주소. 페이지가 떠 있으면 오류 화면 대신 띠로 알리고 몇 초 뒤 지운다. 빈 탭이면
+    /// 오류 화면에 "차단 없이 열기"를 붙이는 근거가 된다.
     var blockedURL: URL?
+    /// 막은 이동이 클릭 가로채기였고 누른 링크로 되돌렸다. 띠에 "열기" 대신 그 사실을 적는다.
+    var blockedRecovered = false
+
+    /// 막은 이동을 띠로 알린다. 몇 초 뒤 스스로 지운다.
+    private func showBlocked(_ url: URL, recovered: Bool) {
+        blockedURL = url
+        blockedRecovered = recovered
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(6))
+            if self?.blockedURL == url { self?.blockedURL = nil; self?.blockedRecovered = false }
+        }
+    }
     /// 다음 로드 한 번은 규칙 목록 없이 간다. 커밋되면 TabStore가 규칙을 다시 걸고 끈다.
     @ObservationIgnored var bypassBlockerForNextLoad = false
 
@@ -99,6 +111,7 @@ final class Tab: Identifiable {
         // 손이 닿은 시각을 이동 정책에 알린다 — 스크립트 주도 이동이 사용자 조작에서 난 것인지 가른다.
         webView.addGestureRecognizer(TouchObserver.make { [weak coordinator] in coordinator?.noteUserTouch() })
         webView.configuration.userContentController.add(coordinator, name: "slateAdIntent")
+        webView.configuration.userContentController.add(coordinator, name: "slateClickIntent")
         webView.configuration.userContentController.add(coordinator, name: "slateStickyOpen")
         webView.configuration.userContentController.add(coordinator, name: "slateTranslate")
         coordinator.onCommit = { [weak self] url in
@@ -125,6 +138,9 @@ final class Tab: Identifiable {
             guard let self, self.sticky, let current = self.webView.url else { return false }
             return !URLPart.isPaginationMove(from: current, to: url)
         }
+        coordinator.onHijackRecovered = { [weak self] blocked in
+            self?.showBlocked(blocked, recovered: true)
+        }
         coordinator.onStart = { [weak self] in
             self?.loadError = nil
             self?.loadErrorDetail = nil
@@ -136,15 +152,24 @@ final class Tab: Identifiable {
             let failed = error.userInfo[NSURLErrorFailingURLErrorKey] as? URL
             // 차단기가 막은 이동인데 뒤에 페이지가 떠 있으면 실패가 아니다 — 페이지는 그대로 두고
             // 띠로만 알린다. WebKit은 실패를 알리기 전에 url을 원래 페이지로 되돌려 둔다.
+            // 방금 누른 같은 사이트 링크가 있고 그 링크의 기본 이동을 핸들러가 막았다면 클릭
+            // 가로채기다 — 누른 링크로 간다.
             if BrowserCoordinator.isBlockedByContentBlocker(error), let failed, self.webView.url != nil {
-                self.blockedURL = failed
-                Task { @MainActor [weak self] in
-                    try? await Task.sleep(for: .seconds(6))
-                    if self?.blockedURL == failed { self?.blockedURL = nil }
+                if let intent = self.coordinator.recentClickIntent(within: 3), intent.prevented, intent.url != failed,
+                   !BrowserCoordinator.isCrossSite(intent.url, current: self.webView.url) {
+                    self.showBlocked(failed, recovered: true)
+                    if self.coordinator.shouldDetourToNewTab?(intent.url) == true {
+                        self.coordinator.onOpenInNewTab?(intent.url)
+                    } else {
+                        self.webView.load(URLRequest(url: intent.url))
+                    }
+                } else {
+                    self.showBlocked(failed, recovered: false)
                 }
                 return
             }
             self.blockedURL = BrowserCoordinator.isBlockedByContentBlocker(error) ? failed : nil
+            self.blockedRecovered = false
             self.failedURL = failed
             // 실패한 주소를 주소창에 남긴다 — 커밋이 안 됐으므로 lastURL이 비어 있고,
             // 그대로 두면 주소창이 빈 채라 주소를 고쳐 다시 시도할 수가 없다.

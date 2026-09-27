@@ -127,6 +127,30 @@ final class BrowserCoordinatorTests: XCTestCase {
                                                                 adIntentAge: 0.1))
     }
 
+    // MARK: - 클릭 가로채기 되돌리기
+
+    private func intent(_ raw: String, prevented: Bool) -> BrowserCoordinator.ClickIntent {
+        BrowserCoordinator.ClickIntent(url: URL(string: raw)!, prevented: prevented, time: Date())
+    }
+
+    /// 같은 사이트 링크를 눌렀는데 핸들러가 기본 이동을 막고 딴 사이트로 보내면 가로채기다.
+    func testHijackIsRecoveredOnlyForPreventedSameSiteAnchor() {
+        let detail = intent("https://example.org/view/2.html", prevented: true)
+        XCTAssertTrue(BrowserCoordinator.shouldRecoverHijack(type: .other, target: ad, current: page, intent: detail))
+        let notPrevented = intent("https://example.org/view/2.html", prevented: false)
+        XCTAssertFalse(BrowserCoordinator.shouldRecoverHijack(type: .other, target: ad, current: page, intent: notPrevented),
+                       "기본 이동을 안 막았으면 앵커가 스스로 갈 것이다")
+        let external = intent("https://accounts.example/login", prevented: true)
+        XCTAssertFalse(BrowserCoordinator.shouldRecoverHijack(type: .other, target: ad, current: page, intent: external),
+                       "누른 링크 자체가 딴 사이트면 판단하지 않는다")
+        let sameSiteTarget = URL(string: "https://example.org/other")!
+        XCTAssertFalse(BrowserCoordinator.shouldRecoverHijack(type: .other, target: sameSiteTarget, current: page, intent: detail),
+                       "같은 사이트 안 이동은 라우터의 몫이다")
+        XCTAssertFalse(BrowserCoordinator.shouldRecoverHijack(type: .linkActivated, target: ad, current: page, intent: detail),
+                       "링크 탭 자체는 가로채기가 아니다")
+        XCTAssertFalse(BrowserCoordinator.shouldRecoverHijack(type: .other, target: ad, current: page, intent: nil))
+    }
+
     func testRegistrableDomainKeepsShortSecondLevel() {
         XCTAssertEqual(BrowserCoordinator.registrableDomain("www.example.co.kr"), "example.co.kr")
         XCTAssertEqual(BrowserCoordinator.registrableDomain("a.b.example.org"), "example.org")

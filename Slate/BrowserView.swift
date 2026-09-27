@@ -291,12 +291,16 @@ struct BrowserView: View {
                 Image(systemName: "shield.slash")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.secondary)
-                Text("막은 이동 · \(blocked.host ?? blocked.absoluteString)")
+                Text(tab.blockedRecovered
+                     ? "광고로 넘기는 이동을 막고 누른 링크로 갑니다 · \(blocked.host ?? "")"
+                     : "막은 이동 · \(blocked.host ?? blocked.absoluteString)")
                     .font(.footnote)
                     .lineLimit(1)
-                Button("열기") { store.loadBypassingBlocker(blocked, in: tab) }
-                    .font(.footnote.weight(.semibold))
-                    .buttonStyle(.borderless)
+                if !tab.blockedRecovered {
+                    Button("열기") { store.loadBypassingBlocker(blocked, in: tab) }
+                        .font(.footnote.weight(.semibold))
+                        .buttonStyle(.borderless)
+                }
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 9)
