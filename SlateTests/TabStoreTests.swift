@@ -70,6 +70,39 @@ final class TabStoreTests: XCTestCase {
         try await waitUntil { b.webView.url?.host == "b.example" }
     }
 
+    /// 페이지를 든 탭은 넷까지다. 다섯째 탭을 고르면 가장 오래 안 본 탭이 절전되고, 그 탭을 다시
+    /// 고르면 되살아나며 그다음으로 오래된 탭이 내려간다.
+    @MainActor func testActivatingBeyondLiveLimitHibernatesLeastRecentlySeenTab() async throws {
+        let store = TabStore(defaults: UserDefaults(suiteName: #function)!)
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        window.isHidden = false
+        for index in 0..<5 {
+            store.newTab()
+            let tab = store.tabs[index]
+            tab.webView.frame = window.bounds
+            window.addSubview(tab.webView)
+            // 주소 없는 문서 — 절전 복원이 네트워크를 안 타서 로드 종료를 기다릴 수 있다.
+            tab.webView.loadHTMLString("<p>\(index)</p>", baseURL: nil)
+        }
+        let tabs = store.tabs
+        try await waitUntil(describe: { tabs.map { "\(String(describing: $0.webView.url)) loading=\($0.webView.isLoading)" }.joined(separator: " | ") }) {
+            tabs.allSatisfy { !$0.webView.isLoading && $0.lastURL != nil }
+        }
+        // 탭을 하나씩 고르고 그때마다 로드가 끝나길 기다린다 — 로드 중인 탭은 내리지 않으므로,
+        // 사람이 탭을 넘기는 속도로 가야 상한이 지켜진다.
+        for tab in tabs {
+            store.activate(tab)
+            try await waitUntil { tabs.allSatisfy { !$0.webView.isLoading } }
+        }
+        XCTAssertTrue(tabs[0].hibernated, "가장 오래 안 본 탭이 내려간다")
+        XCTAssertEqual(tabs.dropFirst().filter(\.hibernated).count, 0)
+
+        store.activate(tabs[0])
+        XCTAssertFalse(tabs[0].hibernated)
+        XCTAssertTrue(tabs[1].hibernated, "그다음으로 오래된 탭이 내려간다")
+        XCTAssertEqual(tabs.filter { !$0.hibernated }.count, 4)
+    }
+
     /// 페이지가 떠 있는 탭에서 차단기가 이동을 막으면 오류 화면이 아니라 띠다. 빈 탭이면 오류 화면에
     /// "차단 없이 열기" 근거(blockedURL)가 남는다.
     @MainActor func testBlockedNavigationShowsBannerWhenPageExistsAndErrorWhenNot() async throws {

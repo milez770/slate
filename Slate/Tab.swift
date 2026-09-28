@@ -53,6 +53,8 @@ final class Tab: Identifiable {
     /// pendingInteractionState에 들고 있다. 다시 고르면 TabStore가 되살린다. 절전 중에는
     /// 웹뷰가 빈 페이지를 물고 있으므로 주소·그림을 갱신하지 않는다.
     var hibernated = false
+    /// 마지막으로 이 탭을 본 시각. TabStore가 살아 있는 페이지 상한을 지킬 때 오래된 순으로 내린다.
+    @ObservationIgnored var lastActivatedAt = Date.distantPast
     /// 페이지가 실제로 칠하는 배경색. 상태바 뒤를 이 색으로 메워 콘텐츠와 이어 보이게 한다.
     var pageBackground: UIColor = .systemBackground
     /// 로드 실패 사유. nil이 아니면 화면에 오류를 띄운다.
@@ -153,7 +155,11 @@ final class Tab: Identifiable {
             // 문서 로드 완료 시점에 한 번 더 밀어 넣어 순서 의존을 없앤다 — 중복 호출은 무해하다.
             self?.applyStoredRules()
             self?.pushStickyFlag()
-            self?.captureSnapshot()
+            // 웹 프로세스가 첫 화면을 그려 올릴 틈을 준 뒤 찍는다.
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .milliseconds(400))
+                self?.captureSnapshot()
+            }
         }
         coordinator.onLoadEnd = { webView in
             webView.scrollView.refreshControl?.endRefreshing()
@@ -288,32 +294,30 @@ final class Tab: Identifiable {
     /// 12MB씩 쥔다.
     nonisolated static let snapshotWidth: CGFloat = 200
 
-    /// 지금 보이는 화면을 찍는다. 로드 완료 때 자동으로 부르고, 격자를 열 때도 한 번 더
+    /// 지금 보이는 화면을 찍는다. 로드 완료 뒤 잠시 있다 자동으로 부르고, 격자를 열 때도 한 번 더
     /// 부른다 — 스크롤·SPA 이동으로 화면이 달라졌어도 카드가 마지막 모습을 담게.
     func captureSnapshot() {
-        guard !hibernated else { return }   // 빈 페이지를 찍어 카드 그림을 덮으면 안 된다
-        let configuration = WKSnapshotConfiguration()
-        configuration.snapshotWidth = NSNumber(value: Double(Self.snapshotWidth))
-        webView.takeSnapshot(with: configuration) { [weak self] image, _ in
-            // 완료 블록은 메인 스레드에서 온다. 여기서 바로 복사해야 한다.
-            guard let image, let copy = Self.detached(image) else { return }
-            Task { @MainActor in
-                self?.thumbnail = copy
-                self?.onSnapshot?(copy)
-            }
-        }
+        guard !hibernated, let image = Self.thumbnail(of: webView) else { return }
+        thumbnail = image
+        onSnapshot?(image)
     }
 
-    /// WebKit이 준 그림은 웹 프로세스와 나눠 쓰는 메모리(IOSurface)에 얹혀 있다. 뒤늦게 다른
-    /// 스레드에서 읽으면 이미 버려진 메모리를 건드려 죽는다 — 우리 소유의 비트맵으로 바로 복사한다.
-    nonisolated static func detached(_ image: UIImage) -> UIImage? {
-        let size = image.size
-        guard size.width > 0, size.height > 0 else { return nil }
+    /// 뷰의 지금 모습을 카드 폭으로 우리 비트맵에 그린다. 창에 붙어 보이는 뷰만 그린다.
+    /// WebKit의 takeSnapshot은 웹 프로세스와 나눠 쓰는 표면(IOSurface)에 얹힌 그림을 넘기는데,
+    /// 완료 블록 안에서 바로 복사해도 그 표면이 이미 비워져 있으면 그리다 죽는다. drawHierarchy는
+    /// 렌더 서버가 그 자리에서 우리 컨텍스트에 그려 주므로 남의 메모리를 들고 있는 순간이 없다.
+    static func thumbnail(of view: UIView) -> UIImage? {
+        let bounds = view.bounds
+        guard bounds.width > 0, bounds.height > 0, view.window != nil, !view.isHidden else { return nil }
+        let size = CGSize(width: snapshotWidth, height: (bounds.height * snapshotWidth / bounds.width).rounded())
         let format = UIGraphicsImageRendererFormat.default()
-        format.scale = image.scale
         format.opaque = true
         return UIGraphicsImageRenderer(size: size, format: format).image { _ in
-            image.draw(in: CGRect(origin: .zero, size: size))
+            let rect = CGRect(origin: .zero, size: size)
+            // 마지막으로 그려진 프레임을 쓴다. 아직 한 번도 안 그려졌으면 지금 그려서 찍는다.
+            if !view.drawHierarchy(in: rect, afterScreenUpdates: false) {
+                view.drawHierarchy(in: rect, afterScreenUpdates: true)
+            }
         }
     }
 

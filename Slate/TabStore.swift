@@ -159,6 +159,18 @@ final class TabStore {
     /// 절전 안 된 탭 수. 설정 화면 표시용.
     var liveTabCount: Int { tabs.filter { !$0.hibernated }.count }
 
+    /// 페이지를 들고 있는 탭의 상한. 보는 탭과 최근에 본 탭 셋만 페이지를 들고 나머지는 절전한다 —
+    /// 탭마다 웹 프로세스가 하나씩 붙어 기기 메모리를 나눠 쓰므로, 열어 둔 탭 수만큼 자라게 두면
+    /// iOS의 부족 알림이 오기 전에 할당이 실패해 앱이 죽는다.
+    static let liveTabLimit = 4
+
+    /// 상한을 넘는 만큼 가장 오래 안 본 탭부터 내린다. 탭을 고르거나 새로 열 때 부른다.
+    private func enforceLiveLimit() {
+        let others = tabs.filter { $0 !== activeTab && !$0.hibernated && $0.webView.url != nil }
+            .sorted { $0.lastActivatedAt > $1.lastActivatedAt }
+        for tab in others.dropFirst(Self.liveTabLimit - 1) { hibernate(tab) }
+    }
+
     /// iOS가 메모리 부족을 알렸다. 보는 탭 하나만 남기고 나머지 페이지를 내리고, 들고 있던
     /// 그림도 놓는다. 이걸 안 하면 다음 할당이 실패해 앱이 죽는다.
     func relieveMemoryPressure() {
@@ -348,6 +360,8 @@ final class TabStore {
         tabs.append(tab)
         activeTab?.thumbnail = nil
         activeTab = tab
+        tab.lastActivatedAt = Date()
+        enforceLiveLimit()
     }
 
     /// 링크 롱탭 "새 탭에서 열기". 새 탭으로 전환하고, 방문 기록에는 원래 탭의 마지막
@@ -428,6 +442,8 @@ final class TabStore {
         // 그림은 보는 탭만 들고 있다. 안 보는 탭의 카드는 디스크 그림으로 그린다.
         if let previous = activeTab, previous !== tab { previous.thumbnail = nil }
         activeTab = tab
+        tab.lastActivatedAt = Date()
+        defer { enforceLiveLimit() }
         if tab.hibernated {
             tab.hibernated = false
             restoreContent(of: tab)
