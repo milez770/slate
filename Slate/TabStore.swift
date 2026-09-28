@@ -282,7 +282,7 @@ final class TabStore {
     /// 차단기가 막은 주소를 이 한 번만 규칙 없이 연다. 문서가 커밋되면 규칙을 다시 건다 —
     /// 그 페이지 안의 광고 요청은 그때부터 다시 막힌다. 사이트 설정은 건드리지 않는다.
     func loadBypassingBlocker(_ url: URL, in tab: Tab) {
-        tab.blockedURL = nil
+        tab.blocked = nil
         tab.loadError = nil
         tab.loadErrorDetail = nil
         tab.bypassBlockerForNextLoad = true
@@ -294,12 +294,8 @@ final class TabStore {
     /// 끊어 둔 딴 사이트 이동을 사용자가 열기로 했다. 규칙은 그대로 둔 채 그 주소로 간다 —
     /// 고정 탭이면 새 탭으로.
     func openBlockedTarget(_ url: URL, in tab: Tab) {
-        tab.blockedURL = nil
-        if tab.coordinator.shouldDetourToNewTab?(url) == true {
-            openLinkInNewTab(url, from: tab)
-        } else {
-            tab.webView.load(URLRequest(url: url))
-        }
+        tab.blocked = nil
+        tab.coordinator.open(url, in: tab.webView)
     }
 
     /// 메뉴에서 이 사이트의 차단 방식을 바꿨다. 저장하고 이 탭에 바로 적용한 뒤 새로고침한다.
@@ -358,10 +354,7 @@ final class TabStore {
             self?.openLinkInNewTab(url, from: tab)
         }
         tabs.append(tab)
-        activeTab?.thumbnail = nil
-        activeTab = tab
-        tab.lastActivatedAt = Date()
-        enforceLiveLimit()
+        activate(tab)
     }
 
     /// 링크 롱탭 "새 탭에서 열기". 새 탭으로 전환하고, 방문 기록에는 원래 탭의 마지막
@@ -443,14 +436,11 @@ final class TabStore {
         if let previous = activeTab, previous !== tab { previous.thumbnail = nil }
         activeTab = tab
         tab.lastActivatedAt = Date()
-        defer { enforceLiveLimit() }
-        if tab.hibernated {
+        if tab.hibernated || tab.webView.url == nil {
             tab.hibernated = false
             restoreContent(of: tab)
-            return
         }
-        guard tab.webView.url == nil else { return }
-        restoreContent(of: tab)
+        enforceLiveLimit()
     }
 
     /// 빈 웹뷰에 페이지를 되살린다. 이력이 있으면 이력째, 없으면 주소만.

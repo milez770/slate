@@ -62,29 +62,31 @@ final class Tab: Identifiable {
     /// 실패의 오류 도메인·코드·실패 주소. 오류 화면 아래에 작게 띄운다 — 사유 문장만으로는
     /// 차단기·네트워크·WebKit 중 어디서 난 실패인지 알 수 없다.
     var loadErrorDetail: String?
-    /// 막은 이동의 주소. 페이지가 떠 있으면 오류 화면 대신 띠로 알리고 몇 초 뒤 지운다. 빈 탭이면
-    /// 오류 화면에 "차단 없이 열기"를 붙이는 근거가 된다.
-    var blockedURL: URL?
-    /// 어떤 막음이었나. 띠 문구와 "열기"의 동작이 갈린다.
-    enum BlockedKind {
-        /// 콘텐츠 차단기 규칙이 문서를 막았다. "열기"는 그 한 번 규칙 없이 연다.
-        case contentRule
-        /// 스크립트가 딴 사이트로 보내는 이동을 끊었다. "열기"는 그 주소로 그냥 간다.
-        case scriptJump
-        /// 클릭 가로채기를 끊고 누른 링크로 되돌렸다. "열기" 없음.
-        case recovered
+    /// 막은 이동. 페이지가 떠 있으면 오류 화면 대신 띠로 알리고 몇 초 뒤 지운다. 빈 탭이면 오류
+    /// 화면에 "차단 없이 열기"를 붙이는 근거가 된다. 종류에 따라 띠 문구와 "열기"의 동작이 갈린다.
+    struct BlockedNavigation: Equatable {
+        enum Kind {
+            /// 콘텐츠 차단기 규칙이 문서를 막았다. "열기"는 그 한 번 규칙 없이 연다.
+            case contentRule
+            /// 스크립트가 딴 사이트로 보내는 이동을 끊었다. "열기"는 그 주소로 그냥 간다.
+            case scriptJump
+            /// 클릭 가로채기를 끊고 누른 링크로 되돌렸다. "열기" 없음.
+            case recovered
+        }
+        let url: URL
+        let kind: Kind
     }
-    var blockedKind: BlockedKind = .contentRule
+    var blocked: BlockedNavigation?
 
     /// 막은 이동을 띠로 알린다. 몇 초 뒤 스스로 지운다. 막힌 이동의 출발점이 빈 중계 페이지면
     /// 그 전 페이지로 돌아간다.
-    func showBlocked(_ url: URL, kind: BlockedKind) {
-        blockedURL = url
-        blockedKind = kind
+    func showBlocked(_ url: URL, kind: BlockedNavigation.Kind) {
+        let entry = BlockedNavigation(url: url, kind: kind)
+        blocked = entry
         if kind != .recovered { retreatIfBlankPage() }
         Task { @MainActor [weak self] in
             try? await Task.sleep(for: .seconds(6))
-            if self?.blockedURL == url { self?.blockedURL = nil }
+            if self?.blocked == entry { self?.blocked = nil }
         }
     }
 
@@ -101,6 +103,18 @@ final class Tab: Identifiable {
             self.webView.goBack()
         }
     }
+    /// 페이지가 떠 있는 채로 차단기가 이동을 막았다. 방금 누른 같은 사이트 링크가 있고 그 링크의
+    /// 기본 이동을 핸들러가 막았다면 클릭 가로채기다 — 누른 링크로 간다. 아니면 띠만 띄운다.
+    private func noteBlockedByRules(_ failed: URL) {
+        if let intent = coordinator.recentClickIntent(within: 3), intent.prevented, intent.url != failed,
+           !BrowserCoordinator.isCrossSite(intent.url, current: webView.url) {
+            showBlocked(failed, kind: .recovered)
+            coordinator.open(intent.url, in: webView)
+        } else {
+            showBlocked(failed, kind: .contentRule)
+        }
+    }
+
     /// 다음 로드 한 번은 규칙 목록 없이 간다. 커밋되면 TabStore가 규칙을 다시 걸고 끈다.
     @ObservationIgnored var bypassBlockerForNextLoad = false
 
@@ -150,7 +164,7 @@ final class Tab: Identifiable {
             // 새 문서는 번역으로 시작한다.
             if self.showingOriginal { self.showingOriginal = false }
         }
-        coordinator.onFinish = { [weak self] webView in
+        coordinator.onFinish = { [weak self] _ in
             // didCommit과 atDocumentStart 스크립트 실행의 선후는 WebKit이 보장하지 않는다.
             // 문서 로드 완료 시점에 한 번 더 밀어 넣어 순서 의존을 없앤다 — 중복 호출은 무해하다.
             self?.applyStoredRules()
@@ -183,26 +197,14 @@ final class Tab: Identifiable {
             guard let self else { return }
             let error = error as NSError
             let failed = error.userInfo[NSURLErrorFailingURLErrorKey] as? URL
+            let blockedByRules = BrowserCoordinator.isBlockedByContentBlocker(error)
             // 차단기가 막은 이동인데 뒤에 페이지가 떠 있으면 실패가 아니다 — 페이지는 그대로 두고
             // 띠로만 알린다. WebKit은 실패를 알리기 전에 url을 원래 페이지로 되돌려 둔다.
-            // 방금 누른 같은 사이트 링크가 있고 그 링크의 기본 이동을 핸들러가 막았다면 클릭
-            // 가로채기다 — 누른 링크로 간다.
-            if BrowserCoordinator.isBlockedByContentBlocker(error), let failed, self.webView.url != nil {
-                if let intent = self.coordinator.recentClickIntent(within: 3), intent.prevented, intent.url != failed,
-                   !BrowserCoordinator.isCrossSite(intent.url, current: self.webView.url) {
-                    self.showBlocked(failed, kind: .recovered)
-                    if self.coordinator.shouldDetourToNewTab?(intent.url) == true {
-                        self.coordinator.onOpenInNewTab?(intent.url)
-                    } else {
-                        self.webView.load(URLRequest(url: intent.url))
-                    }
-                } else {
-                    self.showBlocked(failed, kind: .contentRule)
-                }
+            if blockedByRules, let failed, self.webView.url != nil {
+                self.noteBlockedByRules(failed)
                 return
             }
-            self.blockedURL = BrowserCoordinator.isBlockedByContentBlocker(error) ? failed : nil
-            self.blockedKind = .contentRule
+            self.blocked = blockedByRules ? failed.map { BlockedNavigation(url: $0, kind: .contentRule) } : nil
             self.failedURL = failed
             // 실패한 주소를 주소창에 남긴다 — 커밋이 안 됐으므로 lastURL이 비어 있고,
             // 그대로 두면 주소창이 빈 채라 주소를 고쳐 다시 시도할 수가 없다.

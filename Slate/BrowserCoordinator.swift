@@ -34,7 +34,7 @@ final class BrowserCoordinator: NSObject, WKUIDelegate, WKNavigationDelegate {
         lastClickIntent = ClickIntent(url: url, prevented: prevented, time: Date())
     }
 
-    func recentClickIntent(within seconds: TimeInterval) -> ClickIntent? {
+    func recentClickIntent(within seconds: TimeInterval = gestureWindow) -> ClickIntent? {
         guard let intent = lastClickIntent, Date().timeIntervalSince(intent.time) < seconds else { return nil }
         return intent
     }
@@ -75,6 +75,13 @@ final class BrowserCoordinator: NSObject, WKUIDelegate, WKNavigationDelegate {
         lastTouch.map { Date().timeIntervalSince($0) }
     }
 
+    /// 손이 닿은 뒤 이 시간 안의 이동을 "사용자가 일으킨 것"으로 본다. 클릭 의도의 유효 시간도 같다.
+    nonisolated static let gestureWindow: TimeInterval = 2
+
+    nonisolated static func withinGesture(_ age: TimeInterval?) -> Bool {
+        (age ?? .infinity) < gestureWindow
+    }
+
     /// 웹뷰가 스스로 보여줄 수 있는 스킴. 그 밖(kakaotalk:·itms-apps:·tel: 등)은 다른 앱의 몫이다.
     nonisolated static let webSchemes: Set<String> = ["http", "https", "about", "blob", "data", "file", "javascript"]
 
@@ -88,7 +95,7 @@ final class BrowserCoordinator: NSObject, WKUIDelegate, WKNavigationDelegate {
     nonisolated static func isUserInitiated(type: WKNavigationType, touchAge: TimeInterval?) -> Bool {
         switch type {
         case .linkActivated, .formSubmitted: return true
-        default: return (touchAge ?? .infinity) < 2
+        default: return withinGesture(touchAge)
         }
     }
 
@@ -100,7 +107,7 @@ final class BrowserCoordinator: NSObject, WKUIDelegate, WKNavigationDelegate {
                                          touchAge: TimeInterval?) -> Bool {
         switch type {
         case .linkActivated: return true
-        case .other: return (touchAge ?? .infinity) < 2 && !isCrossSite(target, current: current)
+        case .other: return withinGesture(touchAge) && !isCrossSite(target, current: current)
         default: return false
         }
     }
@@ -110,7 +117,7 @@ final class BrowserCoordinator: NSObject, WKUIDelegate, WKNavigationDelegate {
     /// 수법이 대부분이라 페이지를 벗어나지 않게 끊는다. 손 안 댄 리다이렉트(로그인 흐름 등)는 통과.
     nonisolated static func isScriptJump(type: WKNavigationType, target: URL, current: URL?,
                                          touchAge: TimeInterval?, intent: ClickIntent?) -> Bool {
-        guard type == .other, (touchAge ?? .infinity) < 2, isCrossSite(target, current: current) else { return false }
+        guard type == .other, withinGesture(touchAge), isCrossSite(target, current: current) else { return false }
         if let intent, !isCrossSite(target, current: intent.url) { return false }   // 누른 링크가 그 사이트로 가는 것
         return true
     }
@@ -144,64 +151,78 @@ final class BrowserCoordinator: NSObject, WKUIDelegate, WKNavigationDelegate {
         }
     }
 
+    /// 메인 프레임 이동 하나에 내리는 결정. 위에서부터 먼저 맞는 것이 이긴다.
+    enum NavigationDecision: Equatable {
+        /// 그대로 간다.
+        case allow
+        /// 광고 신호 직후의 딴 사이트 이동. 조용히 버린다.
+        case drop
+        /// 클릭 가로채기. 이 이동을 끊고 누른 링크로 간다.
+        case recover(URL)
+        /// 스크립트가 딴 사이트로 보내는 이동. 끊고 띠로 알린다.
+        case blockScriptJump
+        /// 고정 탭에서 다른 페이지로 가는 이동. 새 탭으로 돌린다.
+        case detour
+    }
+
+    nonisolated static func decide(type: WKNavigationType, target: URL, current: URL?,
+                                   touchAge: TimeInterval?, adIntentAge: TimeInterval?, intent: ClickIntent?,
+                                   detours: (URL) -> Bool) -> NavigationDecision {
+        if shouldBlockNavigation(type: type, target: target, current: current, adIntentAge: adIntentAge) { return .drop }
+        if let intent, shouldRecoverHijack(type: type, target: target, current: current, intent: intent) {
+            return .recover(intent.url)
+        }
+        if isScriptJump(type: type, target: target, current: current, touchAge: touchAge, intent: intent) {
+            return .blockScriptJump
+        }
+        if shouldDetour(type: type, target: target, current: current, touchAge: touchAge), detours(target) { return .detour }
+        return .allow
+    }
+
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        guard let url = navigationAction.request.url else { decisionHandler(.allow); return }
         // 웹뷰가 못 보여주는 스킴은 웹뷰에 태우지 않는다 — 태우면 "URL을 표시할 수 없다"
         // 오류로 끝난다. 사용자가 시작한 이동이면 다른 앱에서 열지 묻는다.
-        if let url = navigationAction.request.url, !Self.isWebScheme(url) {
+        if !Self.isWebScheme(url) {
             decisionHandler(.cancel)
             if Self.isUserInitiated(type: navigationAction.navigationType, touchAge: touchAge) {
                 confirmOpenExternalApp(url, from: webView)
             }
             return
         }
-        if navigationAction.targetFrame?.isMainFrame == true,
-           let url = navigationAction.request.url,
-           Self.shouldBlockNavigation(type: navigationAction.navigationType, target: url,
-                                      current: webView.url, adIntentAge: adIntentAge) {
+        guard navigationAction.targetFrame?.isMainFrame == true else { decisionHandler(.allow); return }
+        let decision = Self.decide(type: navigationAction.navigationType, target: url, current: webView.url,
+                                   touchAge: touchAge, adIntentAge: adIntentAge,
+                                   intent: recentClickIntent(within: Self.gestureWindow),
+                                   detours: { shouldDetourToNewTab?($0) == true })
+        switch decision {
+        case .allow:
+            onMainFrameNavigation?(url)
+            decisionHandler(.allow)
+        case .drop:
             decisionHandler(.cancel)
-            return
-        }
-        // 클릭 가로채기: 누른 링크 대신 광고로 보내는 이동은 끊고 누른 링크로 간다.
-        if navigationAction.targetFrame?.isMainFrame == true,
-           let url = navigationAction.request.url,
-           let intent = recentClickIntent(within: 2),
-           Self.shouldRecoverHijack(type: navigationAction.navigationType, target: url,
-                                    current: webView.url, intent: intent) {
+        case .recover(let intended):
             lastClickIntent = nil
             decisionHandler(.cancel)
             onHijackRecovered?(url)
-            if shouldDetourToNewTab?(intent.url) == true {
-                onOpenInNewTab?(intent.url)
-            } else {
-                webView.load(URLRequest(url: intent.url))
-            }
-            return
-        }
-        // 스크립트가 딴 사이트로 보내는 이동: 광고다. 새 탭으로도, 제자리로도 가지 않고 끊는다.
-        if navigationAction.targetFrame?.isMainFrame == true,
-           let url = navigationAction.request.url,
-           Self.isScriptJump(type: navigationAction.navigationType, target: url, current: webView.url,
-                             touchAge: touchAge, intent: recentClickIntent(within: 2)) {
+            open(intended, in: webView)
+        case .blockScriptJump:
             decisionHandler(.cancel)
             onScriptJumpBlocked?(url)
-            return
-        }
-        // 고정 탭: 사용자가 일으킨 이동이 다른 페이지 모양이면 새 탭으로 돌리고 이 페이지는
-        // 그대로 둔다. 쪽 넘김(숫자만 다른 이동)은 제자리에서 간다.
-        if navigationAction.targetFrame?.isMainFrame == true,
-           let url = navigationAction.request.url,
-           Self.shouldDetour(type: navigationAction.navigationType, target: url, current: webView.url,
-                             touchAge: touchAge),
-           shouldDetourToNewTab?(url) == true {
-            onOpenInNewTab?(url)
+        case .detour:
             decisionHandler(.cancel)
-            return
+            onOpenInNewTab?(url)
         }
-        if navigationAction.targetFrame?.isMainFrame == true, let url = navigationAction.request.url {
-            onMainFrameNavigation?(url)
+    }
+
+    /// 주소를 연다. 고정 탭이 새 탭으로 돌릴 이동이면 새 탭에, 아니면 이 웹뷰에.
+    func open(_ url: URL, in webView: WKWebView) {
+        if shouldDetourToNewTab?(url) == true {
+            onOpenInNewTab?(url)
+        } else {
+            webView.load(URLRequest(url: url))
         }
-        decisionHandler(.allow)
     }
 
     /// 화면에 알릴 실패인가. 로딩 도중 다른 곳으로 이동하면 앞선 로드가 취소(-999)로 끝나고,
@@ -271,29 +292,20 @@ final class BrowserCoordinator: NSObject, WKUIDelegate, WKNavigationDelegate {
         }
     }
 
-    // 팝업: 기본 거부. 사용자가 직접 누른 링크만 현재 탭에서 연다(딴 사이트 창은 popup-guard가
-    // 가짜 창으로 막는다). 스크립트가 연 창은 누른 앵커와 같은 주소일 때만 싣고 나머지는 버리며
-    // 광고 신호로 친다. 같은 제스처에서 광고 신호가 왔으면 그 링크는 화면을 덮은 낚시 앵커다 —
-    // 현재 탭에도 안 싣는다.
+    // 팝업: 기본 거부. 사용자가 직접 누른 링크만 현재 탭(고정 탭이면 새 탭)에서 연다 — 딴 사이트
+    // 창은 popup-guard가 가짜 창으로 막는다. 스크립트가 연 창은 누른 앵커와 같은 주소일 때만 싣고
+    // 나머지는 버리며 광고 신호로 친다. 같은 제스처에서 광고 신호가 왔으면 그 링크는 화면을 덮은
+    // 낚시 앵커다 — 현재 탭에도 안 싣는다.
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                  for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-        if let url = navigationAction.request.url,
-           navigationAction.navigationType == .other,
-           !Self.shouldHonorNewWindow(type: .other, url: url, intent: recentClickIntent(within: 2)) {
-            noteAdIntent()
+        guard let url = navigationAction.request.url else { return nil }
+        let type = navigationAction.navigationType
+        guard Self.shouldHonorNewWindow(type: type, url: url, intent: recentClickIntent(within: Self.gestureWindow)) else {
+            if type == .other { noteAdIntent() }
             return nil
         }
-        if let url = navigationAction.request.url,
-           Self.shouldHonorNewWindow(type: navigationAction.navigationType, url: url,
-                                     intent: recentClickIntent(within: 2)) {
-            if let age = adIntentAge, age < 1, Self.isCrossSite(url, current: webView.url) { return nil }
-            // 고정 탭이면 target=_blank 링크도 현재 탭 대신 새 탭으로.
-            if shouldDetourToNewTab?(url) == true {
-                onOpenInNewTab?(url)
-                return nil
-            }
-            webView.load(URLRequest(url: url))
-        }
+        if let age = adIntentAge, age < 1, Self.isCrossSite(url, current: webView.url) { return nil }
+        open(url, in: webView)
         return nil
     }
 
@@ -453,8 +465,10 @@ extension BrowserCoordinator: WKScriptMessageHandler {
                 webView.evaluateJavaScript("window.__slateApplyTranslations(\(reply)); 0",
                                            in: frame, in: .page) { _ in }
             }
-        default:
+        case "slateAdIntent":
             noteAdIntent()
+        default:
+            break
         }
     }
 

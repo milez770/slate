@@ -181,6 +181,27 @@ final class BrowserCoordinatorTests: XCTestCase {
         XCTAssertFalse(BrowserCoordinator.isScriptJump(type: .other, target: sameSite, current: page, touchAge: 0.3, intent: nil))
     }
 
+    /// 결정 순서: 광고 신호 직후 버림 → 가로채기 복구 → 스크립트 딴 사이트 이동 차단 → 고정 탭 우회 → 허용.
+    func testDecisionOrder() {
+        typealias C = BrowserCoordinator
+        let sameSite = URL(string: "https://example.org/view/9.html")!
+        let detail = intent("https://example.org/view/2.html", prevented: true)
+        let sticky: (URL) -> Bool = { _ in true }
+        let plain: (URL) -> Bool = { _ in false }
+        XCTAssertEqual(C.decide(type: .other, target: ad, current: page, touchAge: 0.2, adIntentAge: 0.2,
+                                intent: detail, detours: sticky), .drop, "광고 신호가 가로채기 복구보다 앞선다")
+        XCTAssertEqual(C.decide(type: .other, target: ad, current: page, touchAge: 0.2, adIntentAge: nil,
+                                intent: detail, detours: plain), .recover(detail.url))
+        XCTAssertEqual(C.decide(type: .other, target: ad, current: page, touchAge: 0.2, adIntentAge: nil,
+                                intent: nil, detours: sticky), .blockScriptJump, "딴 사이트 스크립트 이동은 고정 탭이라도 새 탭이 아니다")
+        XCTAssertEqual(C.decide(type: .linkActivated, target: sameSite, current: page, touchAge: nil, adIntentAge: nil,
+                                intent: nil, detours: sticky), .detour)
+        XCTAssertEqual(C.decide(type: .linkActivated, target: sameSite, current: page, touchAge: nil, adIntentAge: nil,
+                                intent: nil, detours: plain), .allow)
+        XCTAssertEqual(C.decide(type: .other, target: ad, current: page, touchAge: nil, adIntentAge: nil,
+                                intent: nil, detours: sticky), .allow, "손 안 댄 리다이렉트는 그대로 간다")
+    }
+
     func testRegistrableDomainKeepsShortSecondLevel() {
         XCTAssertEqual(BrowserCoordinator.registrableDomain("www.example.co.kr"), "example.co.kr")
         XCTAssertEqual(BrowserCoordinator.registrableDomain("a.b.example.org"), "example.org")

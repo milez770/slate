@@ -126,7 +126,7 @@ struct BrowserView: View {
                 .ignoresSafeArea(edges: .bottom)
                 .background(Color(uiColor: tab.pageBackground).ignoresSafeArea(edges: .top))
                 .overlay { loadErrorView }
-                .overlay(alignment: .bottom) { blockedBanner.animation(.spring(response: 0.3), value: tab.blockedURL) }
+                .overlay(alignment: .bottom) { blockedBanner.animation(.spring(response: 0.3), value: tab.blocked) }
                 .modifier(pageZoom)
             bottomBar()
                 // 바 접힘·주소 포커스의 스프링은 바에만 건다. 뷰 전체에 걸면 탭을 바꿀 때
@@ -157,7 +157,7 @@ struct BrowserView: View {
                 .onGeometryChange(for: CGRect.self, of: { $0.frame(in: .global) }) { webFrame = $0 }
             allWebViews
                 .overlay { loadErrorView }
-                .overlay(alignment: .bottom) { blockedBanner.animation(.spring(response: 0.3), value: tab.blockedURL) }
+                .overlay(alignment: .bottom) { blockedBanner.animation(.spring(response: 0.3), value: tab.blocked) }
                 // 배경색은 마스크 안에 있어야 한다 — 밖에 두면 격자를 열었을 때 접힌 페이지
                 // 대신 배경색이 화면 전체를 덮어 격자가 안 보인다.
                 .background(Color(uiColor: tab.pageBackground).ignoresSafeArea())
@@ -262,8 +262,8 @@ struct BrowserView: View {
                     }
                     .accessibilityIdentifier("retryLoadButton")
                     // 차단기가 막은 첫 로드. 정말 가려던 페이지면 이 한 번은 규칙 없이 연다.
-                    if let blocked = tab.blockedURL, tab.blockedKind == .contentRule {
-                        Button { store.loadBypassingBlocker(blocked, in: tab) } label: {
+                    if let blocked = tab.blocked, blocked.kind == .contentRule {
+                        Button { store.loadBypassingBlocker(blocked.url, in: tab) } label: {
                             Text("차단 없이 열기")
                                 .font(.subheadline.weight(.semibold))
                                 .foregroundStyle(.primary)
@@ -286,25 +286,18 @@ struct BrowserView: View {
     /// 정말 가려던 주소면 "열기"로 이 한 번만 규칙 없이 간다.
     @ViewBuilder
     private var blockedBanner: some View {
-        if let blocked = tab.blockedURL, tab.loadError == nil {
+        if let blocked = tab.blocked, tab.loadError == nil {
             HStack(spacing: 10) {
                 Image(systemName: "shield.slash")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.secondary)
-                Text(blockedBannerText(blocked))
+                Text(bannerText(for: blocked))
                     .font(.footnote)
                     .lineLimit(1)
-                switch tab.blockedKind {
-                case .contentRule:
-                    Button("열기") { store.loadBypassingBlocker(blocked, in: tab) }
+                if let open = openAction(for: blocked) {
+                    Button("열기", action: open)
                         .font(.footnote.weight(.semibold))
                         .buttonStyle(.borderless)
-                case .scriptJump:
-                    Button("열기") { store.openBlockedTarget(blocked, in: tab) }
-                        .font(.footnote.weight(.semibold))
-                        .buttonStyle(.borderless)
-                case .recovered:
-                    EmptyView()
                 }
             }
             .padding(.horizontal, 14)
@@ -316,12 +309,21 @@ struct BrowserView: View {
         }
     }
 
-    private func blockedBannerText(_ blocked: URL) -> String {
-        let host = blocked.host ?? blocked.absoluteString
-        switch tab.blockedKind {
+    private func bannerText(for blocked: Tab.BlockedNavigation) -> String {
+        let host = blocked.url.host ?? blocked.url.absoluteString
+        switch blocked.kind {
         case .contentRule: return "막은 이동 · \(host)"
         case .scriptJump: return "딴 사이트로 보내는 이동을 막았다 · \(host)"
         case .recovered: return "광고 이동을 막고 누른 링크로 갑니다 · \(host)"
+        }
+    }
+
+    /// 띠의 "열기". 규칙이 막은 문서는 그 한 번 규칙 없이, 끊은 스크립트 이동은 그 주소로 그냥 간다.
+    private func openAction(for blocked: Tab.BlockedNavigation) -> (() -> Void)? {
+        switch blocked.kind {
+        case .contentRule: return { store.loadBypassingBlocker(blocked.url, in: tab) }
+        case .scriptJump: return { store.openBlockedTarget(blocked.url, in: tab) }
+        case .recovered: return nil
         }
     }
 

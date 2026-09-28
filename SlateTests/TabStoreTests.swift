@@ -104,7 +104,7 @@ final class TabStoreTests: XCTestCase {
     }
 
     /// 페이지가 떠 있는 탭에서 차단기가 이동을 막으면 오류 화면이 아니라 띠다. 빈 탭이면 오류 화면에
-    /// "차단 없이 열기" 근거(blockedURL)가 남는다.
+    /// "차단 없이 열기" 근거(blocked)가 남는다.
     @MainActor func testBlockedNavigationShowsBannerWhenPageExistsAndErrorWhenNot() async throws {
         let store = TabStore(defaults: UserDefaults(suiteName: #function)!)
         store.newTab()
@@ -119,14 +119,14 @@ final class TabStoreTests: XCTestCase {
 
         tab.coordinator.onFail?(error)
         XCTAssertEqual(tab.loadError, "차단", "빈 탭의 첫 로드가 막히면 오류 화면")
-        XCTAssertEqual(tab.blockedURL, blocked)
+        XCTAssertEqual(tab.blocked?.url, blocked)
 
         tab.coordinator.onStart?()
         tab.webView.loadHTMLString("<p>A</p>", baseURL: URL(string: "https://a.example/")!)
         try await waitUntil { !tab.webView.isLoading && tab.webView.url?.host == "a.example" && tab.lastURL?.host == "a.example" }
         tab.coordinator.onFail?(error)
         XCTAssertNil(tab.loadError, "페이지가 있으면 오류 화면을 덮지 않는다")
-        XCTAssertEqual(tab.blockedURL, blocked, "띠로 알린다")
+        XCTAssertEqual(tab.blocked?.url, blocked, "띠로 알린다")
         XCTAssertEqual(tab.lastURL?.host, "a.example", "주소창은 원래 페이지")
     }
 
@@ -150,8 +150,7 @@ final class TabStoreTests: XCTestCase {
         tab.coordinator.noteClickIntent(detail, prevented: true)
         tab.coordinator.onFail?(error)
         XCTAssertNil(tab.loadError)
-        XCTAssertEqual(tab.blockedURL, ad)
-        XCTAssertEqual(tab.blockedKind, .recovered)
+        XCTAssertEqual(tab.blocked, Tab.BlockedNavigation(url: ad, kind: .recovered))
         try await waitUntil { tab.webView.url?.path == "/detail/1" }
         // 시험 환경엔 네트워크가 없어 그 로드는 실패하고 주소는 원래 페이지로 돌아온다.
         try await waitUntil { !tab.webView.isLoading && tab.webView.url?.path == "/" }
@@ -170,12 +169,12 @@ final class TabStoreTests: XCTestCase {
         store.newTab()
         let tab = store.tabs[0]
         let url = URL(string: "https://site7.com/detail/1")!
-        tab.blockedURL = url
+        tab.blocked = Tab.BlockedNavigation(url: url, kind: .contentRule)
         tab.loadError = "차단"
         store.loadBypassingBlocker(url, in: tab)
         XCTAssertTrue(tab.bypassBlockerForNextLoad)
         XCTAssertEqual(tab.appliedBlockingMode, .off)
-        XCTAssertNil(tab.blockedURL)
+        XCTAssertNil(tab.blocked)
         XCTAssertNil(tab.loadError)
         store.applyBlocking(to: tab, for: url)
         XCTAssertEqual(tab.appliedBlockingMode, .off, "커밋 전에는 규칙을 다시 걸지 않는다")
