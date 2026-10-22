@@ -85,6 +85,27 @@ final class AutoTranslateTests: XCTestCase {
         XCTAssertEqual(got, ["あとから"], "새로 생긴 일본어만 다시 모은다")
     }
 
+    /// 글이 많은 페이지도 답을 기다리는 문구는 두 묶음(120개)까지다. 답이 오면 나머지를 이어서 보낸다.
+    func testLongPageWaitsForAnswersBeforeSendingMore() async throws {
+        let h = harness()
+        let paragraphs = (0..<300).map { "<p>文章その\($0)</p>" }.joined()
+        await h.load("<html><body>\(paragraphs)</body></html>")
+        try await Task.sleep(for: .milliseconds(1500))
+        let first = try await pending(h)
+        XCTAssertEqual(first.count, 120, "답이 오기 전에는 두 묶음까지만 보낸다")
+        var seen = Set(texts(first))
+        for _ in 0..<4 {
+            _ = try await h.eval("""
+                window.__slateApplyTranslations(window.__slateTranslatePending().map(function (i) { return { id: i.id, text: '번역' }; })); 1
+            """)
+            try await Task.sleep(for: .milliseconds(1000))
+            let next = try await pending(h)
+            XCTAssertLessThanOrEqual(next.count, 120)
+            seen.formUnion(texts(next))
+        }
+        XCTAssertEqual(seen.count, 300, "답이 오면 나머지를 이어서 보낸다")
+    }
+
     func testTranslatedNodeIsNotRecollectedButChangedTextIs() async throws {
         let h = harness()
         await h.load(page)

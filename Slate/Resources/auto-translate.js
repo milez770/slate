@@ -8,6 +8,9 @@
   var KANA = /[぀-ヿㇰ-ㇿｦ-ﾟ]/;
   var HAN = /[㐀-䶿一-鿿]/;
   var BATCH = 60;
+  // 답을 기다리는 문구 상한. 넘으면 답이 올 때까지 더 보내지 않는다 — 글이 많은 페이지가 네이티브
+  // 번역 줄을 한꺼번에 채우면 줄 상한에 걸려 먼저 보낸 묶음(페이지 위쪽)부터 버려진다.
+  var MAX_PENDING = BATCH * 2;
   var DEBOUNCE_MS = 300;
   var NO_TRANSLATE = "[translate='no'],.notranslate";
   var SKIP = "script,style,noscript,textarea,input,code,pre,[contenteditable]:not([contenteditable='false'])," + NO_TRANSLATE;
@@ -224,6 +227,7 @@
     timer = null;
     if (document.hidden) return;   // 돌아오면 visibilitychange가 다시 돌린다
     if (showingOriginal) return;   // 원문 보기를 끄면 다시 돌린다
+    if (pending.size >= MAX_PENDING) return;   // 답이 오면 __slateApplyTranslations가 다시 돌린다
     pruneSwapped();
     var batch = collect();
     send(batch);
@@ -263,7 +267,17 @@
       if (parts.core !== entry.text) continue;
       write(entry.node, parts.lead, text, parts.trail);
     }
+    // 답을 기다리느라 멈춰 둔 나머지를 이어서 모은다.
+    if (fullScan || dirty.size) schedule();
   };
+
+  // 뒤로가기로 되살아난 문서는 떠날 때 기다리던 답을 받지 못한다 — 기다림을 비우고 다시 훑는다.
+  window.addEventListener("pageshow", function (e) {
+    if (!e.persisted) return;
+    pending.clear();
+    fullScan = true;
+    schedule();
+  });
 
   window.__slateTranslatePending = function () {
     var out = [];
