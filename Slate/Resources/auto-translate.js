@@ -24,8 +24,10 @@
   var showingOriginal = false;
   // 왕복 중. id → { node, text } 또는 { el, attr, text }
   var pending = new Map();
-  // 원문 → 번역. 같은 문장은 왕복 없이 바꾼다.
+  // 원문 → 번역. 같은 문장은 왕복 없이 바꾼다. 한 페이지에 오래 머물며 글자가 계속 바뀌면 끝없이
+  // 자라므로 상한에 닿으면 비운다 — 비운 뒤에도 네이티브 원장이 왕복 한 번으로 받아 준다.
   var cache = new Map();
+  var CACHE_LIMIT = 5000;
   var nextID = 1;
   var timer = null;
   var pageHasKana = false;
@@ -250,6 +252,7 @@
         else writeAttr(entry.el, entry.attr, entry.el.getAttribute(entry.attr));
         continue;
       }
+      if (cache.size >= CACHE_LIMIT) cache.clear();
       cache.set(entry.text, text);
       if (entry.el) {
         // 답을 기다리는 동안 사이트가 값을 갈았으면 다음 순회가 다시 모은다.

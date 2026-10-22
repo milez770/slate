@@ -39,7 +39,7 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 let stats = TranslationStats.shared
-                Text("요청 \(stats.requested) · 번역 \(stats.translated) · 실패 \(stats.failed) · 원장 적중 \(stats.cacheHits) · 대기 \(stats.queued) · 준비된 원어 \(stats.prepared.isEmpty ? "없음" : stats.prepared.joined(separator: ","))")
+                Text("요청 \(stats.requested) · 번역 \(stats.translated) · 실패 \(stats.failed) · 원장 적중 \(stats.cacheHits) · 대기 \(stats.queued) · 버림 \(stats.dropped) · 준비된 원어 \(stats.prepared.isEmpty ? "없음" : stats.prepared.joined(separator: ","))")
                     .font(.caption2).foregroundStyle(.secondary)
                 Text("원장 \(TranslationCache.shared.count)항목 · translations.jsonl \(ByteCountFormatter.string(fromByteCount: Int64(TranslationCache.shared.fileSize), countStyle: .file))")
                     .font(.caption2).foregroundStyle(.secondary)

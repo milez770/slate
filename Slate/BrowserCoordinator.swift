@@ -50,6 +50,8 @@ final class BrowserCoordinator: NSObject, WKUIDelegate, WKNavigationDelegate {
 
     /// 번역을 요청해 온 하위 프레임. 원문 보기 토글을 이 프레임들에도 보낸다. 문서가 갈리면 비운다.
     private(set) var translationFrames: [WKFrameInfo] = []
+    /// 메인 문서가 갈릴 때마다 오른다. 번역 요청이 그 문서가 떠 있는 동안 온 것인지 가린다.
+    private var documentEpoch = 0
 
     /// popup-guard가 광고 수법(창 열기·가짜 클릭)을 막은 마지막 시각. 광고 스크립트는
     /// 막히면 location 이동으로 넘어가는데, 그건 JS로 못 막는다 — 이 신호 직후의 딴 사이트
@@ -329,6 +331,7 @@ final class BrowserCoordinator: NSObject, WKUIDelegate, WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
         translationFrames.removeAll()
+        documentEpoch += 1
         if let url = webView.url { onCommit?(url) }
     }
 
@@ -459,11 +462,19 @@ extension BrowserCoordinator: WKScriptMessageHandler {
                !translationFrames.contains(where: { $0.request.url == frame.request.url }) {
                 translationFrames.append(frame)
             }
-            Task { @MainActor in
-                let reply = await Self.translateReply(items)
-                // 요청이 온 프레임에 돌려준다. 기본 evaluateJavaScript는 메인 프레임에만 닿는다.
-                webView.evaluateJavaScript("window.__slateApplyTranslations(\(reply)); 0",
-                                           in: frame, in: .page) { _ in }
+            // 요청한 문서가 떠 있는 동안만 번역하고 답한다. 웹뷰는 약하게 쥔다 — 닫은 탭의 웹뷰를
+            // 남은 번역이 붙잡지 않게.
+            let epoch = documentEpoch
+            let isCurrent: @MainActor () -> Bool = { [weak self, weak webView] in
+                webView != nil && self?.documentEpoch == epoch
+            }
+            Task { @MainActor [weak webView] in
+                await Self.translateReply(items, isCurrent: isCurrent) { reply in
+                    guard isCurrent() else { return }
+                    // 요청이 온 프레임에 돌려준다. 기본 evaluateJavaScript는 메인 프레임에만 닿는다.
+                    webView?.evaluateJavaScript("window.__slateApplyTranslations(\(reply)); 0",
+                                                in: frame, in: .page) { _ in }
+                }
             }
         case "slateAdIntent":
             noteAdIntent()
@@ -472,33 +483,51 @@ extension BrowserCoordinator: WKScriptMessageHandler {
         }
     }
 
-    /// [{id, text, lang}] → 번역해서 [{id, text|null}] JSON. 모든 id에 답을 준다 — 답이 없으면
-    /// 스크립트가 그 노드를 영원히 기다린다. 원어별로 묶어 각 세션에 보낸다.
-    static func translateReply(_ items: [[String: Any]]) async -> String {
+    /// [{id, text, lang}]을 번역해 [{id, text|null}] JSON으로 send에 넘긴다. 원장에 있는 문구는 바로
+    /// 보내고, 나머지는 원어별로 번역이 끝나는 대로 보낸다. 모든 id에 답을 준다 — 답이 없으면
+    /// 스크립트가 그 노드를 영원히 기다린다.
+    static func translateReply(_ items: [[String: Any]], isCurrent: @escaping @MainActor () -> Bool = { true },
+                               translator: Translator? = nil, cache: TranslationCache? = nil,
+                               send: (String) -> Void) async {
+        let translator = translator ?? .shared
+        let cache = cache ?? .shared
         struct Item { let id: Int; let text: String; let lang: String }
         let parsed = items.compactMap { item -> Item? in
             guard let id = item["id"] as? Int, let text = item["text"] as? String else { return nil }
             return Item(id: id, text: text, lang: item["lang"] as? String ?? "ja")
         }
-        var out: [[String: Any]] = []
-        let cache = TranslationCache.shared
+        var hits: [[String: Any]] = []
+        var misses: [(source: String, items: [Item])] = []
         for (lang, group) in Dictionary(grouping: parsed, by: \.lang) {
             let source = Translator.source(for: lang, sample: group.map(\.text).joined(separator: "\n"))
-            // 원장에 있는 문구는 모델에 안 보낸다.
-            let misses = group.filter { cache.lookup($0.text, source: source) == nil }
-            TranslationStats.shared.cacheHits += group.count - misses.count
-            let translated = await Translator.shared.translate(misses.map(\.text), source: source)
+            var missed: [Item] = []
+            for item in group {
+                if let text = cache.lookup(item.text, source: source) {
+                    hits.append(["id": item.id, "text": text])
+                } else {
+                    missed.append(item)
+                }
+            }
+            TranslationStats.shared.cacheHits += group.count - missed.count
+            if !missed.isEmpty { misses.append((source, missed)) }
+        }
+        if !hits.isEmpty { send(json(hits)) }
+        for (source, group) in misses {
+            // 같은 문구가 여러 노드에 있으면 한 번만 번역한다.
+            var seen: Set<String> = []
+            let texts = group.map(\.text).filter { seen.insert($0).inserted }
+            let translated = await translator.translate(texts, source: source, isCurrent: isCurrent)
             var fresh: [String: String] = [:]
-            for (item, text) in zip(misses, translated) {
-                if let text { fresh[item.text] = text }
+            for (text, result) in zip(texts, translated) {
+                if let result { fresh[text] = result }
             }
             cache.store(fresh.map { ($0.key, $0.value) }, source: source)
-            for item in group {
-                let text = cache.lookup(item.text, source: source) ?? fresh[item.text]
-                out.append(["id": item.id, "text": text.map { $0 as Any } ?? NSNull()])
-            }
+            send(json(group.map { ["id": $0.id, "text": fresh[$0.text].map { $0 as Any } ?? NSNull()] }))
         }
-        guard let data = try? JSONSerialization.data(withJSONObject: out),
+    }
+
+    private static func json(_ value: [[String: Any]]) -> String {
+        guard let data = try? JSONSerialization.data(withJSONObject: value),
               let json = String(data: data, encoding: .utf8) else { return "[]" }
         return json
     }
