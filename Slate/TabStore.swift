@@ -444,7 +444,7 @@ final class TabStore {
         tab.sticky = closed.sticky
         tab.stickyParentID = closed.stickyParentID
         if let state = closed.state {
-            tab.webView.interactionState = state
+            tab.restore(interactionState: state)
         } else {
             tab.webView.load(URLRequest(url: closed.url))
         }
@@ -479,7 +479,7 @@ final class TabStore {
     private func restoreContent(of tab: Tab) {
         if let state = tab.pendingInteractionState {
             tab.pendingInteractionState = nil
-            tab.webView.interactionState = state
+            tab.restore(interactionState: state)
             // 못 쓰는 상태값(WebKit 판 차이·파일 손상)이면 웹뷰가 조용히 무시한다 —
             // 이력 복원이 안 걸렸으면 주소라도 연다.
             if tab.webView.backForwardList.currentItem == nil, let url = tab.lastURL {

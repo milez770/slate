@@ -180,6 +180,30 @@ final class Tab: Identifiable {
     @ObservationIgnored var onURLChange: (@MainActor (URL, Bool) -> Void)?
     /// 마지막으로 본 뒤로가기 항목. 주소가 바뀌었는데 항목이 같으면 replaceState다.
     @ObservationIgnored private weak var lastListItem: WKBackForwardListItem?
+    /// 이력째 되살린 항목들. 되살린 문서는 이 항목들이 같은 문서 안 기록이었던 것을 모른다.
+    @ObservationIgnored private var restoredItems: Set<ObjectIdentifier> = []
+    /// 지금 떠 있는 문서를 불러온 항목.
+    @ObservationIgnored private weak var loadedItem: WKBackForwardListItem?
+    /// 실제 불러오기가 시작돼 아직 확정·실패하지 않았다.
+    @ObservationIgnored private var navigationInFlight = false
+
+    /// 되살린 항목으로 불러오기 없이 옮겨 왔으면 그 항목을 다시 불러온다.
+    private func reloadIfMovedToRestoredItem() {
+        guard !navigationInFlight, let item = webView.backForwardList.currentItem, item !== loadedItem,
+              restoredItems.contains(ObjectIdentifier(item)) else { return }
+        loadedItem = item
+        webView.reload()
+    }
+
+    /// 뒤로가기 이력을 되살린다. 페이지가 주소만 바꿔 쌓은 기록(SPA의 pushState)도 같은 문서의 항목으로
+    /// 함께 돌아오는데, 새로 불러온 문서는 그 기록을 모른다 — 그 항목으로 옮겨 가면 주소만 바뀌고 화면은
+    /// 그대로 남는다. 되살린 항목은 기억해 두었다가 그리로 옮겨 가면 다시 불러온다.
+    func restore(interactionState: Any) {
+        webView.interactionState = interactionState
+        let list = webView.backForwardList
+        let items = list.backList + [list.currentItem].compactMap { $0 } + list.forwardList
+        restoredItems = Set(items.map(ObjectIdentifier.init))
+    }
     /// 페이지 제목이 잡힐 때 알린다. 제목은 로드 완료보다 늦게 온다.
     @ObservationIgnored var onTitleChange: (@MainActor (String, URL) -> Void)?
     /// 페이지 그림을 찍었을 때 알린다. 받는 쪽이 지금 방문에 붙여 디스크에 남긴다.
@@ -211,6 +235,8 @@ final class Tab: Identifiable {
             guard let self, !self.hibernated else { return }
             self.lastURL = url
             self.lastListItem = self.webView.backForwardList.currentItem
+            self.loadedItem = self.webView.backForwardList.currentItem
+            self.navigationInFlight = false
             self.canGoBack = self.webView.canGoBack
             self.canGoForward = self.webView.canGoForward
             self.applyStoredRules()
@@ -232,7 +258,9 @@ final class Tab: Identifiable {
         coordinator.onWebContentTerminated = { [weak self] in
             self?.webContentTerminated()
         }
-        coordinator.onLoadEnd = { webView in
+        coordinator.onLoadEnd = { [weak self] webView in
+            // 취소(-999)로 끝난 이동은 실패로 알리지 않으므로 여기서 끝을 잡는다.
+            self?.navigationInFlight = false
             webView.scrollView.refreshControl?.endRefreshing()
         }
         coordinator.shouldDetourToNewTab = { [weak self] url in
@@ -246,6 +274,7 @@ final class Tab: Identifiable {
             self?.showBlocked(blocked, kind: .scriptJump)
         }
         coordinator.onStart = { [weak self] in
+            self?.navigationInFlight = true
             self?.loadError = nil
             self?.loadErrorDetail = nil
             self?.failedURL = nil
@@ -323,6 +352,14 @@ final class Tab: Identifiable {
                     // 주소창이 비어 주소를 고쳐 다시 시도할 수가 없다 — nil은 무시한다.
                     guard let self, !self.hibernated, let url = webView.url else { return }
                     self.lastURL = url
+                    // 되살린 이력 안에서 불러오기 없이 옮겨 갔는지 본다. 이때 웹뷰가 로딩 중으로 보이기도 하고
+                    // 뒤로가기 목록의 현재 위치도 조금 늦게 바뀌어서, 잠시 뒤에 본다.
+                    if !self.restoredItems.isEmpty, !self.navigationInFlight {
+                        Task { @MainActor [weak self] in
+                            try? await Task.sleep(for: .milliseconds(150))
+                            self?.reloadIfMovedToRestoredItem()
+                        }
+                    }
                     // 로딩 중이면 일반 로드(제공·리다이렉트 주소 포함)라 didCommit이 처리한다.
                     // 로딩이 아닌데 주소가 바뀌었으면 SPA 이동이다.
                     guard !webView.isLoading else { return }
