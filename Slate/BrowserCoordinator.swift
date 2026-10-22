@@ -328,26 +328,41 @@ final class BrowserCoordinator: NSObject, WKUIDelegate, WKNavigationDelegate {
     }
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        #if DEBUG
+        MemoryLog.event("불러오기 시작 \(webView.url?.path ?? "-")")
+        #endif
         onStart?()
     }
 
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        #if DEBUG
+        MemoryLog.event("불러오기 확정 \(webView.url?.path ?? "-")")
+        #endif
         translationFrames.removeAll()
         documentEpoch += 1
         if let url = webView.url { onCommit?(url) }
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        #if DEBUG
+        MemoryLog.event("불러오기 완료 \(webView.url?.path ?? "-")")
+        #endif
         onFinish?(webView)
         onLoadEnd?(webView)
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        #if DEBUG
+        MemoryLog.event("불러오기 실패 \(webView.url?.path ?? "-") \((error as NSError).code)")
+        #endif
         onLoadEnd?(webView)
         if Self.isRealFailure(error) { onFail?(error) }
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        #if DEBUG
+        MemoryLog.event("불러오기 시작 실패 \(webView.url?.path ?? "-") \((error as NSError).code)")
+        #endif
         onLoadEnd?(webView)
         if Self.isRealFailure(error) { onFail?(error) }
     }

@@ -118,6 +118,16 @@ enum StressDriver {
             } else {
                 await clickNextEpisodes(tab)
             }
+            // -slate.navcheck.restore YES면 넘어간 뒤 그 탭을 내렸다가 되살린 다음 뒤로 간다.
+            if UserDefaults.standard.bool(forKey: "slate.navcheck.restore") {
+                store.newTab()
+                try? await Task.sleep(for: .seconds(1))
+                store.hibernate(tab)
+                MemoryLog.event("이동 확인 탭 내림 웹뷰=\(tab.liveWebView == nil ? "없음" : "있음")")
+                store.activate(tab)
+                await settle(tab)
+                await logPage(tab, "되살림")
+            }
             // -slate.navcheck.swipe YES면 뒤로는 바깥(UI 시험)이 밀어서 하고, 여기서는 1초마다 문서 상태만 남긴다.
             if UserDefaults.standard.bool(forKey: "slate.navcheck.swipe") {
                 MemoryLog.event("이동 확인 앞으로 끝")
@@ -125,6 +135,13 @@ enum StressDriver {
                     try? await Task.sleep(for: .seconds(1))
                     await logPage(tab, "\(second)초")
                 }
+                return
+            }
+            // -slate.navcheck.jump YES면 뒤로가기 목록 맨 앞 항목으로 한 번에 건너뛴다(길게 눌러 고르기와 같은 경로).
+            if UserDefaults.standard.bool(forKey: "slate.navcheck.jump"), let first = tab.webView.backForwardList.backList.first {
+                tab.webView.go(to: first)
+                try? await Task.sleep(for: .milliseconds(3000))
+                await logPage(tab, "맨 앞으로 건너뜀")
                 return
             }
             for step in 1...6 {
