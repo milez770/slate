@@ -117,6 +117,44 @@ final class Tab: Identifiable {
 
     /// 다음 로드 한 번은 규칙 목록 없이 간다. 커밋되면 TabStore가 규칙을 다시 걸고 끈다.
     @ObservationIgnored var bypassBlockerForNextLoad = false
+    /// 안 보는 동안 웹 프로세스가 죽었다. 다시 고를 때 TabStore가 새로고침한다.
+    @ObservationIgnored var reloadWhenShown = false
+    /// 보는 중에 웹 프로세스가 마지막으로 죽은 시각.
+    @ObservationIgnored private var lastTermination: Date?
+
+    /// 웹 프로세스가 죽었을 때 할 일.
+    enum TerminationResponse: Equatable {
+        /// 다시 고를 때 새로고침한다.
+        case reloadWhenShown
+        /// 바로 새로고침한다.
+        case reload
+        /// 새로고침하지 않고 오류 화면으로 알린다.
+        case giveUp
+    }
+
+    /// 안 보는 탭은 다시 고를 때 띄운다 — 바로 띄우면 메모리가 모자라 죽은 탭들이 한꺼번에 되살아나
+    /// 다시 메모리를 다툰다. 보는 탭이 10초 안에 또 죽으면 자동으로 띄우지 않는다 — 죽고 띄우기를
+    /// 되풀이하지 않게.
+    nonisolated static func terminationResponse(hidden: Bool, now: Date, lastTermination: Date?) -> TerminationResponse {
+        if hidden { return .reloadWhenShown }
+        if let last = lastTermination, now.timeIntervalSince(last) < 10 { return .giveUp }
+        return .reload
+    }
+
+    /// 웹 프로세스가 죽었다(대개 메모리 부족).
+    func webContentTerminated(now: Date = Date()) {
+        switch Self.terminationResponse(hidden: webView.isHidden, now: now, lastTermination: lastTermination) {
+        case .reloadWhenShown:
+            reloadWhenShown = true
+        case .reload:
+            lastTermination = now
+            webView.reload()
+        case .giveUp:
+            lastTermination = now
+            loadError = "페이지가 메모리를 너무 많이 써서 멈췄다"
+            loadErrorDetail = "웹 프로세스가 10초 안에 두 번 종료됨"
+        }
+    }
 
     /// 로드 없이 주소가 바뀔 때(SPA의 pushState·replaceState — didCommit이 안 뜬다) 알린다.
     /// 둘째 인자는 뒤로가기 항목이 그대로인가 — replaceState는 항목을 새로 만들지 않고 주소만 고친다.
@@ -178,6 +216,9 @@ final class Tab: Identifiable {
                 try? await Task.sleep(for: .milliseconds(400))
                 self?.captureSnapshot()
             }
+        }
+        coordinator.onWebContentTerminated = { [weak self] in
+            self?.webContentTerminated()
         }
         coordinator.onLoadEnd = { webView in
             webView.scrollView.refreshControl?.endRefreshing()
@@ -301,7 +342,8 @@ final class Tab: Identifiable {
     }
 
     /// 찍는 그림의 폭(포인트). 격자 카드 폭이면 충분하다 — 전체 화면 크기로 찍으면 탭마다
-    /// 12MB씩 쥔다.
+    /// 12MB씩 쥔다. 픽셀은 저장 폭(360px)으로 바로 그린다 — 화면 배율(3배)로 그리면 한 장에
+    /// 3MB를 잡았다가 저장할 때 다시 줄인다.
     nonisolated static let snapshotWidth: CGFloat = 200
 
     /// 지금 보이는 화면을 찍는다. 로드 완료 뒤 잠시 있다 자동으로 부르고, 격자를 열 때도 한 번 더
@@ -322,6 +364,7 @@ final class Tab: Identifiable {
         let size = CGSize(width: snapshotWidth, height: (bounds.height * snapshotWidth / bounds.width).rounded())
         let format = UIGraphicsImageRendererFormat.default()
         format.opaque = true
+        format.scale = SnapshotStore.storedWidth / snapshotWidth
         return UIGraphicsImageRenderer(size: size, format: format).image { _ in
             let rect = CGRect(origin: .zero, size: size)
             // 마지막으로 그려진 프레임을 쓴다. 아직 한 번도 안 그려졌으면 지금 그려서 찍는다.

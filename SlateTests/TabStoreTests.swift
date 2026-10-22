@@ -70,6 +70,61 @@ final class TabStoreTests: XCTestCase {
         try await waitUntil { b.webView.url?.host == "b.example" }
     }
 
+    /// 안 보는 탭의 웹 프로세스가 죽으면 바로 다시 띄우지 않고, 그 탭을 고를 때 띄운다.
+    @MainActor func testHiddenTabWhoseProcessDiedReloadsWhenShown() async throws {
+        let store = TabStore(defaults: UserDefaults(suiteName: #function)!)
+        store.newTab()
+        store.newTab()
+        let a = store.tabs[0], b = store.tabs[1]
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        for tab in [a, b] {
+            tab.webView.frame = window.bounds
+            window.addSubview(tab.webView)
+        }
+        window.isHidden = false
+        a.webView.loadSimulatedRequest(URLRequest(url: URL(string: "https://a.example/")!), responseHTML: "<p>A</p>")
+        try await waitUntil { !a.webView.isLoading && a.lastURL != nil }
+        store.activate(b)
+        a.webView.isHidden = true
+
+        a.coordinator.webViewWebContentProcessDidTerminate(a.webView)
+        XCTAssertTrue(a.reloadWhenShown)
+        XCTAssertFalse(a.webView.isLoading, "숨은 탭은 바로 띄우지 않는다")
+
+        a.webView.isHidden = false
+        store.activate(a)
+        XCTAssertFalse(a.reloadWhenShown)
+        XCTAssertTrue(a.webView.isLoading, "고르면 다시 띄운다")
+    }
+
+    /// 보는 탭은 바로 다시 띄우고, 10초 안에 또 죽으면 자동으로 띄우지 않는다. 안 보는 탭은 고를 때 띄운다.
+    func testTerminationResponse() {
+        let now = Date()
+        XCTAssertEqual(Tab.terminationResponse(hidden: true, now: now, lastTermination: nil), .reloadWhenShown)
+        XCTAssertEqual(Tab.terminationResponse(hidden: true, now: now, lastTermination: now), .reloadWhenShown)
+        XCTAssertEqual(Tab.terminationResponse(hidden: false, now: now, lastTermination: nil), .reload)
+        XCTAssertEqual(Tab.terminationResponse(hidden: false, now: now, lastTermination: now.addingTimeInterval(-5)), .giveUp)
+        XCTAssertEqual(Tab.terminationResponse(hidden: false, now: now, lastTermination: now.addingTimeInterval(-11)), .reload)
+    }
+
+    /// 닫은 탭은 웹뷰째 메모리에서 내려간다.
+    @MainActor func testClosedTabIsReleased() async throws {
+        let store = TabStore(defaults: UserDefaults(suiteName: #function)!)
+        store.newTab()
+        weak var closed: Tab?
+        weak var closedWebView: WKWebView?
+        do {
+            let tab = store.tabs[0]
+            closed = tab
+            closedWebView = tab.webView
+            store.newTab()
+            store.close(tab)
+        }
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertNil(closed, "닫은 탭이 남아 있다")
+        XCTAssertNil(closedWebView, "닫은 탭의 웹뷰가 남아 있다")
+    }
+
     /// 페이지를 든 탭은 넷까지다. 다섯째 탭을 고르면 가장 오래 안 본 탭이 절전되고, 그 탭을 다시
     /// 고르면 되살아나며 그다음으로 오래된 탭이 내려간다.
     @MainActor func testActivatingBeyondLiveLimitHibernatesLeastRecentlySeenTab() async throws {

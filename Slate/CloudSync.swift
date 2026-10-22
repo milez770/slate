@@ -29,6 +29,10 @@ final class CloudSync: NSObject {
         stateURL.deletingLastPathComponent().appendingPathComponent("sync-rules-meta.plist")
     }
     private var engine: CKSyncEngine?
+    /// 아직 안 쓴 엔진 상태. 상태는 바뀔 때마다 통째로 오고 올릴 목록이 길수록 크다 — 1초 모아
+    /// 마지막 것만 쓴다.
+    private var pendingState: CKSyncEngine.State.Serialization?
+    private var stateSaveScheduled = false
 
     private static var zoneID: CKRecordZone.ID { CKRecordZone.ID(zoneName: zoneName) }
     private static func recordID(_ visitID: UUID) -> CKRecord.ID {
@@ -128,6 +132,7 @@ final class CloudSync: NSObject {
         history.onLocalChange = nil
         ruleStore.onLocalChange = nil
         engine = nil
+        pendingState = nil
         try? FileManager.default.removeItem(at: stateURL)
         Self.logger.log("stop(): 동기화 중단")
     }
@@ -162,6 +167,24 @@ final class CloudSync: NSObject {
             Self.logger.error("loadState(): \(error.localizedDescription, privacy: .public)")
             return nil
         }
+    }
+
+    private func scheduleStateSave(_ state: CKSyncEngine.State.Serialization) {
+        pendingState = state
+        guard !stateSaveScheduled else { return }
+        stateSaveScheduled = true
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(1))
+            self?.flushState()
+        }
+    }
+
+    /// 모아 둔 엔진 상태를 지금 쓴다. 백그라운드로 빠질 때도 부른다.
+    func flushState() {
+        stateSaveScheduled = false
+        guard let state = pendingState else { return }
+        pendingState = nil
+        saveState(state)
     }
 
     private func saveState(_ state: CKSyncEngine.State.Serialization) {
@@ -230,7 +253,7 @@ extension CloudSync: CKSyncEngineDelegate {
     func handleEvent(_ event: CKSyncEngine.Event, syncEngine: CKSyncEngine) async {
         switch event {
         case .stateUpdate(let event):
-            saveState(event.stateSerialization)
+            scheduleStateSave(event.stateSerialization)
         case .accountChange(let event):
             handleAccountChange(event)
         case .fetchedRecordZoneChanges(let event):

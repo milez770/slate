@@ -69,15 +69,24 @@ final class SessionCookieStore: NSObject {
         }
     }
 
-    /// 변화가 몰릴 때(페이지 하나가 쿠키 여럿을 심는다) 매번 쓰지 않게 0.5초 모아서 저장한다.
+    /// 변화를 모아 3초에 한 번까지만 저장한다. 저장은 모든 사이트의 쿠키를 앱으로 받아 오므로,
+    /// 쿠키가 쉬지 않고 바뀌는 사이트에서 바뀔 때마다 하면 그때마다 쿠키 전부를 새로 잡는다.
     private func scheduleSnapshot(of store: WKHTTPCookieStore) {
-        saveTask?.cancel()
+        guard saveTask == nil else { return }
         saveTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .milliseconds(500))
+            try? await Task.sleep(for: .seconds(3))
             guard !Task.isCancelled, let self else { return }
-            let cookies = await store.allCookies()
-            self.save(cookies)
+            self.saveTask = nil
+            self.save(await store.allCookies())
         }
+    }
+
+    /// 모아 둔 변화를 지금 저장한다. 백그라운드로 빠질 때 부른다.
+    func flush(from store: WKHTTPCookieStore) async {
+        guard let pending = saveTask else { return }
+        pending.cancel()
+        saveTask = nil
+        save(await store.allCookies())
     }
 }
 

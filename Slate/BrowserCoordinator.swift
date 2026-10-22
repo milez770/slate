@@ -19,6 +19,8 @@ final class BrowserCoordinator: NSObject, WKUIDelegate, WKNavigationDelegate {
     var onHijackRecovered: (@MainActor (URL) -> Void)?
     /// 스크립트가 딴 사이트로 보내는 이동을 끊었다. 페이지는 그대로다. 인자는 끊은 주소.
     var onScriptJumpBlocked: (@MainActor (URL) -> Void)?
+    /// 웹 프로세스가 죽었다. 받는 쪽이 언제 다시 띄울지 정한다. 없으면 바로 다시 띄운다.
+    var onWebContentTerminated: (@MainActor () -> Void)?
 
     /// 사용자가 마지막으로 누른 앵커. popup-guard.js가 클릭 처리가 끝난 뒤 보낸다.
     struct ClickIntent {
@@ -351,7 +353,11 @@ final class BrowserCoordinator: NSObject, WKUIDelegate, WKNavigationDelegate {
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-        webView.reload()
+        if let onWebContentTerminated {
+            onWebContentTerminated()
+        } else {
+            webView.reload()
+        }
     }
 
     // MARK: - 웹페이지 알림창

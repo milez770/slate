@@ -440,7 +440,11 @@ final class TabStore {
         tab.lastActivatedAt = Date()
         if tab.hibernated || tab.webView.url == nil {
             tab.hibernated = false
+            tab.reloadWhenShown = false
             restoreContent(of: tab)
+        } else if tab.reloadWhenShown {
+            tab.reloadWhenShown = false
+            tab.webView.reload()
         }
         enforceLiveLimit()
     }

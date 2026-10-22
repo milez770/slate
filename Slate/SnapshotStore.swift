@@ -10,11 +10,14 @@ final class SnapshotStore: @unchecked Sendable {
 
     /// 저장 폭(픽셀). 격자 카드가 화면에서 쓰는 폭은 약 190pt(@3x 570px)지만 흐리게 깔리고,
     /// 타임라인 썸네일은 60pt다. 360px면 둘 다 덮는다.
-    private static let storedWidth: CGFloat = 360
+    static let storedWidth: CGFloat = 360
     private static let quality: CGFloat = 0.6
     /// 청소 상한. 둘 중 먼저 걸리는 쪽까지 오래된 파일부터 지운다.
     private static let fileLimit = 400
     private static let byteLimit = 60 * 1024 * 1024
+    /// 메모리에 둘 그림의 상한(풀린 비트맵 바이트). 한 장이 1MB 남짓이라 장 수만으로 막으면
+    /// 40장이 40MB를 넘는다.
+    private static let memoryLimit = 12 * 1024 * 1024
 
     private let dir: URL
     private let cache = NSCache<NSString, UIImage>()
@@ -23,6 +26,12 @@ final class SnapshotStore: @unchecked Sendable {
     init(directory: URL = SnapshotStore.defaultDirectory()) {
         dir = directory
         cache.countLimit = 40
+        cache.totalCostLimit = Self.memoryLimit
+    }
+
+    /// 그림이 풀렸을 때 차지하는 바이트.
+    private static func cost(_ image: UIImage) -> Int {
+        Int(image.size.width * image.scale * image.size.height * image.scale) * 4
     }
 
     static func defaultDirectory() -> URL {
@@ -40,7 +49,7 @@ final class SnapshotStore: @unchecked Sendable {
         io.async { [weak self] in
             guard let self else { return }
             let small = Self.downscaled(image)
-            self.cache.setObject(small, forKey: id.uuidString as NSString)
+            self.cache.setObject(small, forKey: id.uuidString as NSString, cost: Self.cost(small))
             guard let data = small.jpegData(compressionQuality: Self.quality) else { return }
             do {
                 try FileManager.default.createDirectory(at: self.dir, withIntermediateDirectories: true)
@@ -69,7 +78,7 @@ final class SnapshotStore: @unchecked Sendable {
                     continuation.resume(returning: nil)
                     return
                 }
-                self.cache.setObject(image, forKey: key)
+                self.cache.setObject(image, forKey: key, cost: Self.cost(image))
                 continuation.resume(returning: image)
             }
         }

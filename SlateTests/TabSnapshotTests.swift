@@ -26,7 +26,7 @@ final class TabSnapshotTests: XCTestCase {
         return (rgba[0], rgba[1], rgba[2])
     }
 
-    /// 창에 붙은 뷰를 카드 폭(200pt)으로, 비율을 지켜 우리 비트맵에 그린다. 색이 실제로 담긴다.
+    /// 창에 붙은 뷰를 카드 폭(200pt)·저장 폭(360px)으로, 비율을 지켜 우리 비트맵에 그린다. 색이 실제로 담긴다.
     func testThumbnailRendersVisibleViewAtCardWidth() {
         let view = UIView()
         view.backgroundColor = .red
@@ -35,7 +35,8 @@ final class TabSnapshotTests: XCTestCase {
         let image = Tab.thumbnail(of: view)
         XCTAssertNotNil(image)
         XCTAssertEqual(image?.size.width, 200)
-        XCTAssertEqual(image?.size.height, (844 * 200 / 390).rounded())
+        XCTAssertEqual(image?.cgImage?.width, 360, "저장 폭 픽셀로 바로 그린다")
+        XCTAssertEqual(Double(image?.cgImage?.height ?? 0), 844 * 360 / 390, accuracy: 1)
         let center = pixel(image!, at: CGPoint(x: 100, y: 200))
         XCTAssertNotNil(center)
         XCTAssertGreaterThan(center!.r, 200)

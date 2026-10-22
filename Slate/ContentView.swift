@@ -67,10 +67,13 @@ struct ContentView: View {
             if scenePhase == .background {
                 store.saveState()
                 store.saveInteractionStates()
-                // 방문 기록·번역 원장은 모아 쓰기라 마지막 몇 초가 아직 파일에 없을 수 있다 — 지금 쓴다.
+                // 방문 기록·번역 원장·세션 쿠키·동기화 상태는 모아 쓰기라 마지막 몇 초가 아직 파일에
+                // 없을 수 있다 — 지금 쓴다.
+                CloudSync.shared.flushState()
                 Task {
                     await store.history.flush()
                     await TranslationCache.shared.flush()
+                    await SessionCookieStore.shared.flush(from: WKWebsiteDataStore.default().httpCookieStore)
                 }
             }
         }
