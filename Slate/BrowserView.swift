@@ -171,12 +171,14 @@ struct BrowserView: View {
         }
     }
 
-    /// 전체 탭의 웹뷰 더미. 활성 탭만 보이고 만질 수 있다. 나머지는 UIKit hidden — 계층에는
-    /// 남아 스크롤 위치를 지키되 WebKit에는 안 보이는 페이지로 잡혀 메모리를 놓는다.
+    /// 페이지를 든 탭의 웹뷰 더미. 활성 탭만 보이고 만질 수 있다. 나머지는 UIKit hidden — 계층에는
+    /// 남아 스크롤 위치를 지키되 WebKit에는 안 보이는 페이지로 잡혀 메모리를 놓는다. 내린 탭은
+    /// 계층에 두지 않는다. 탭을 내리면 웹뷰가 바뀌므로 웹뷰마다 뷰를 새로 만든다.
     private var allWebViews: some View {
         ZStack {
-            ForEach(store.tabs) { t in
+            ForEach(store.tabs.filter { !$0.hibernated || $0 === tab }) { t in
                 WebView(webView: t.webView, isActive: t === tab)
+                    .id(ObjectIdentifier(t.webView))
                     .allowsHitTesting(t === tab)
             }
         }

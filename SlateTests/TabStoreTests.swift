@@ -56,12 +56,14 @@ final class TabStoreTests: XCTestCase {
         }) { !a.webView.isLoading && !b.webView.isLoading && a.lastURL != nil && b.lastURL != nil }
         store.activate(a)
 
+        let oldWebView = b.webView
         store.relieveMemoryPressure()
         XCTAssertFalse(a.hibernated, "보는 탭은 그대로")
         XCTAssertTrue(b.hibernated)
         XCTAssertNotNil(b.pendingInteractionState, "뒤로가기 이력을 들고 있다")
         XCTAssertEqual(store.liveTabCount, 1)
-        try await waitUntil { b.webView.url?.absoluteString == "about:blank" }
+        XCTAssertFalse(b.webView === oldWebView, "웹뷰를 새것으로 바꿔 웹 프로세스까지 놓는다")
+        XCTAssertNil(b.webView.url, "새 웹뷰는 아무것도 불러오지 않았다")
         XCTAssertEqual(b.lastURL, URL(string: "https://b.example/")!, "빈 페이지 로드가 주소를 덮지 않는다")
 
         store.activate(b)

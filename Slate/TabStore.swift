@@ -186,13 +186,17 @@ final class TabStore {
         SnapshotStore.shared.dropMemoryCache()
     }
 
-    /// 탭의 페이지를 내린다. 뒤로가기 이력은 pendingInteractionState에 남겨 다시 고를 때
-    /// 그 자리로 돌아온다. 주소창·격자 카드는 lastURL과 디스크 그림을 그대로 쓴다.
+    /// 탭의 페이지를 내린다. 웹뷰를 새것으로 바꿔 웹 프로세스까지 놓는다. 뒤로가기 이력은
+    /// pendingInteractionState에 남겨 다시 고를 때 그 자리로 돌아온다. 주소창·격자 카드는
+    /// lastURL과 디스크 그림을 그대로 쓴다.
     func hibernate(_ tab: Tab) {
         guard !tab.hibernated, tab.webView.url != nil, !tab.webView.isLoading else { return }
         tab.pendingInteractionState = tab.webView.interactionState as? Data
         tab.hibernated = true
-        tab.webView.load(URLRequest(url: URL(string: "about:blank")!))
+        tab.thumbnail = nil
+        tab.replaceWebView(configuration: Self.makeConfiguration())
+        applyRuleLists(to: tab)
+        applyUserScripts(to: tab)
     }
 
     /// 탭에 얹을 스크립트 목록. 차단 방식이 끄기면 광고를 건드리는 스크립트를 빼고, 나머지 두
@@ -546,6 +550,8 @@ final class TabStore {
         // 로드는 하지 않는다 — 화면에 붙을 때 ContentView가 activate()로 연다.
         let index = defaults.integer(forKey: Self.activeKey)
         activeTab = tabs.indices.contains(index) ? tabs[index] : tabs[tabs.count - 1]
+        // 되살린 탭은 내린 채로 시작한다 — 고를 때 이력째 불러온다. 보는 탭은 activate가 불러온다.
+        for tab in tabs where tab !== activeTab { tab.hibernated = true }
         SnapshotStore.shared.prune(keeping: Set(history.visits.map(\.id)))
     }
 

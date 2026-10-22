@@ -9,7 +9,8 @@ final class Tab: Identifiable {
     private static let logger = Logger(subsystem: "com.wonseon.slate", category: "tab")
 
     let id: UUID
-    let webView: WKWebView
+    /// 이 탭의 웹뷰. 탭을 내리면 TabStore가 페이지를 한 번도 불러오지 않은 새 웹뷰로 바꾼다.
+    private(set) var webView: WKWebView
     let coordinator: BrowserCoordinator
     var lastURL: URL?
     var canGoBack = false
@@ -188,16 +189,6 @@ final class Tab: Identifiable {
         webView = WKWebView(frame: .zero, configuration: configuration)
         coordinator = BrowserCoordinator()
         self.ruleStore = ruleStore
-        webView.allowsBackForwardNavigationGestures = true
-        webView.allowsLinkPreview = true
-        webView.uiDelegate = coordinator
-        webView.navigationDelegate = coordinator
-        // 손이 닿은 시각을 이동 정책에 알린다 — 스크립트 주도 이동이 사용자 조작에서 난 것인지 가른다.
-        webView.addGestureRecognizer(TouchObserver.make { [weak coordinator] in coordinator?.noteUserTouch() })
-        webView.configuration.userContentController.add(coordinator, name: "slateAdIntent")
-        webView.configuration.userContentController.add(coordinator, name: "slateClickIntent")
-        webView.configuration.userContentController.add(coordinator, name: "slateStickyOpen")
-        webView.configuration.userContentController.add(coordinator, name: "slateTranslate")
         coordinator.onCommit = { [weak self] url in
             guard let self, !self.hibernated else { return }
             self.lastURL = url
@@ -262,6 +253,38 @@ final class Tab: Identifiable {
                 .compactMap { $0 }.joined(separator: " · ")
         }
 
+        attach(webView)
+    }
+
+    /// 웹뷰를 페이지를 한 번도 불러오지 않은 새 웹뷰로 바꾼다. 옛 웹뷰와 거기 붙은 웹 프로세스는 놓는다 —
+    /// 같은 웹뷰에 빈 페이지만 불러 두면 웹뷰가 남아 웹 프로세스도 남는다. 새 웹뷰는 불러오기 전까지
+    /// 웹 프로세스가 없다.
+    func replaceWebView(configuration: WKWebViewConfiguration) {
+        let old = webView
+        observations = []
+        old.stopLoading()
+        old.navigationDelegate = nil
+        old.uiDelegate = nil
+        old.configuration.userContentController.removeAllScriptMessageHandlers()
+        webView = WKWebView(frame: .zero, configuration: configuration)
+        lastListItem = nil
+        lastScrollY = 0
+        scrollAccumulator = 0
+        attach(webView)
+    }
+
+    /// 웹뷰에 위임자·메시지 처리기·새로고침·관찰을 붙인다.
+    private func attach(_ webView: WKWebView) {
+        webView.allowsBackForwardNavigationGestures = true
+        webView.allowsLinkPreview = true
+        webView.uiDelegate = coordinator
+        webView.navigationDelegate = coordinator
+        // 손이 닿은 시각을 이동 정책에 알린다 — 스크립트 주도 이동이 사용자 조작에서 난 것인지 가른다.
+        webView.addGestureRecognizer(TouchObserver.make { [weak coordinator] in coordinator?.noteUserTouch() })
+        webView.configuration.userContentController.add(coordinator, name: "slateAdIntent")
+        webView.configuration.userContentController.add(coordinator, name: "slateClickIntent")
+        webView.configuration.userContentController.add(coordinator, name: "slateStickyOpen")
+        webView.configuration.userContentController.add(coordinator, name: "slateTranslate")
         let refreshControl = UIRefreshControl()
         refreshControl.addAction(UIAction { [weak self] _ in
             guard let self, self.webView.url != nil else {
