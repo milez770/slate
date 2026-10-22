@@ -9,8 +9,21 @@ final class Tab: Identifiable {
     private static let logger = Logger(subsystem: "com.wonseon.slate", category: "tab")
 
     let id: UUID
-    /// 이 탭의 웹뷰. 탭을 내리면 TabStore가 페이지를 한 번도 불러오지 않은 새 웹뷰로 바꾼다.
-    private(set) var webView: WKWebView
+    /// 이 탭의 웹뷰. 내린 탭은 웹뷰를 놓아 liveWebView가 비어 있다 — 웹뷰는 페이지를 불러오지
+    /// 않아도 만들어지는 순간 웹 프로세스를 하나 붙잡는다(기기에서 탭 67개일 때 웹 프로세스 69개).
+    /// 비어 있을 때 부르면 그 자리에서 새로 만든다.
+    var webView: WKWebView {
+        if let liveWebView { return liveWebView }
+        let created = WKWebView(frame: .zero, configuration: makeConfiguration())
+        liveWebView = created
+        attach(created)
+        onWebViewCreated?(created)
+        return created
+    }
+    private(set) var liveWebView: WKWebView?
+    /// 웹뷰를 새로 만든 직후 알린다. TabStore가 규칙 목록·스크립트를 얹는다.
+    @ObservationIgnored var onWebViewCreated: (@MainActor (WKWebView) -> Void)?
+    @ObservationIgnored private let makeConfiguration: @MainActor () -> WKWebViewConfiguration
     let coordinator: BrowserCoordinator
     var lastURL: URL?
     var canGoBack = false
@@ -27,7 +40,7 @@ final class Tab: Identifiable {
 
     /// 지금 문서에 고정 여부를 알린다. 문서가 갈릴 때마다 다시 심어야 한다.
     private func pushStickyFlag() {
-        webView.evaluateJavaScript("window.__slateSticky = \(sticky)") { _, error in
+        liveWebView?.evaluateJavaScript("window.__slateSticky = \(sticky)") { _, error in
             if let error {
                 Self.logger.error("pushStickyFlag: \(error.localizedDescription, privacy: .public)")
             }
@@ -42,6 +55,7 @@ final class Tab: Identifiable {
 
     /// 원문 보기 상태를 문서에 알린다. 번역을 요청해 온 하위 프레임에도 보낸다.
     private func pushShowOriginal() {
+        guard let webView = liveWebView else { return }
         let js = "window.__slateShowOriginal && window.__slateShowOriginal(\(showingOriginal)); 0"
         webView.evaluateJavaScript(js) { _, _ in }
         for frame in coordinator.translationFrames {
@@ -183,10 +197,14 @@ final class Tab: Identifiable {
     @ObservationIgnored private var lastScrollY: CGFloat = 0
     @ObservationIgnored private var scrollAccumulator: CGFloat = 0
 
-    init(id: UUID = UUID(), configuration: WKWebViewConfiguration = WKWebViewConfiguration(),
+    /// configuration이 nil이면 웹뷰 없이(내린 채로) 만든다. makeConfiguration은 웹뷰를 나중에 새로
+    /// 만들 때 쓴다.
+    init(id: UUID = UUID(), configuration: WKWebViewConfiguration? = WKWebViewConfiguration(),
+         makeConfiguration: @escaping @MainActor () -> WKWebViewConfiguration = { WKWebViewConfiguration() },
          ruleStore: SiteRuleStore = .shared) {
         self.id = id
-        webView = WKWebView(frame: .zero, configuration: configuration)
+        liveWebView = configuration.map { WKWebView(frame: .zero, configuration: $0) }
+        self.makeConfiguration = makeConfiguration
         coordinator = BrowserCoordinator()
         self.ruleStore = ruleStore
         coordinator.onCommit = { [weak self] url in
@@ -253,24 +271,21 @@ final class Tab: Identifiable {
                 .compactMap { $0 }.joined(separator: " · ")
         }
 
-        attach(webView)
+        if let liveWebView { attach(liveWebView) }
     }
 
-    /// 웹뷰를 페이지를 한 번도 불러오지 않은 새 웹뷰로 바꾼다. 옛 웹뷰와 거기 붙은 웹 프로세스는 놓는다 —
-    /// 같은 웹뷰에 빈 페이지만 불러 두면 웹뷰가 남아 웹 프로세스도 남는다. 새 웹뷰는 불러오기 전까지
-    /// 웹 프로세스가 없다.
-    func replaceWebView(configuration: WKWebViewConfiguration) {
-        let old = webView
+    /// 웹뷰를 놓는다. 화면 계층에서도 빠지면 웹 프로세스가 같이 내려간다. 다시 부르면 새로 만든다.
+    func unloadWebView() {
+        guard let old = liveWebView else { return }
         observations = []
         old.stopLoading()
         old.navigationDelegate = nil
         old.uiDelegate = nil
         old.configuration.userContentController.removeAllScriptMessageHandlers()
-        webView = WKWebView(frame: .zero, configuration: configuration)
+        liveWebView = nil
         lastListItem = nil
         lastScrollY = 0
         scrollAccumulator = 0
-        attach(webView)
     }
 
     /// 웹뷰에 위임자·메시지 처리기·새로고침·관찰을 붙인다.

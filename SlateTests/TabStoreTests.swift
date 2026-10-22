@@ -62,8 +62,8 @@ final class TabStoreTests: XCTestCase {
         XCTAssertTrue(b.hibernated)
         XCTAssertNotNil(b.pendingInteractionState, "뒤로가기 이력을 들고 있다")
         XCTAssertEqual(store.liveTabCount, 1)
-        XCTAssertFalse(b.webView === oldWebView, "웹뷰를 새것으로 바꿔 웹 프로세스까지 놓는다")
-        XCTAssertNil(b.webView.url, "새 웹뷰는 아무것도 불러오지 않았다")
+        XCTAssertNil(b.liveWebView, "웹뷰를 놓아 웹 프로세스까지 내려간다")
+        _ = oldWebView
         XCTAssertEqual(b.lastURL, URL(string: "https://b.example/")!, "빈 페이지 로드가 주소를 덮지 않는다")
 
         store.activate(b)
@@ -107,6 +107,29 @@ final class TabStoreTests: XCTestCase {
         XCTAssertEqual(Tab.terminationResponse(hidden: false, now: now, lastTermination: nil), .reload)
         XCTAssertEqual(Tab.terminationResponse(hidden: false, now: now, lastTermination: now.addingTimeInterval(-5)), .giveUp)
         XCTAssertEqual(Tab.terminationResponse(hidden: false, now: now, lastTermination: now.addingTimeInterval(-11)), .reload)
+    }
+
+    /// 재시작하면 보는 탭만 웹뷰를 만들고 나머지는 웹뷰 없이 내린 채로 둔다. 웹뷰는 만들어지는 순간
+    /// 웹 프로세스를 붙잡는다. 고르면 그때 만들어 저장된 주소를 연다.
+    @MainActor func testRestoredTabsHaveNoWebViewUntilPicked() {
+        let defaults = UserDefaults(suiteName: #function)!
+        defaults.removePersistentDomain(forName: #function)
+        let first = TabStore(defaults: defaults)
+        for host in ["one", "two", "three"] {
+            first.newTab()
+            first.activeTab?.lastURL = URL(string: "https://\(host).example/")!
+        }
+        first.saveState()
+
+        let second = TabStore(defaults: defaults)
+        second.restoreState()
+        XCTAssertEqual(second.tabs.count, 3)
+        XCTAssertEqual(second.tabs.filter { $0.liveWebView != nil }.map(\.lastURL?.host),
+                       ["three.example"], "보는 탭만 웹뷰가 있다")
+        XCTAssertEqual(second.tabs.filter(\.hibernated).count, 2)
+        second.activate(second.tabs[0])
+        XCTAssertNotNil(second.tabs[0].liveWebView, "고르면 웹뷰를 만든다")
+        XCTAssertFalse(second.tabs[0].hibernated)
     }
 
     /// 닫은 탭은 웹뷰째 메모리에서 내려간다.

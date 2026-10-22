@@ -171,7 +171,7 @@ final class TabStore {
 
     /// 상한을 넘는 만큼 가장 오래 안 본 탭부터 내린다. 탭을 고르거나 새로 열 때 부른다.
     private func enforceLiveLimit() {
-        let others = tabs.filter { $0 !== activeTab && !$0.hibernated && $0.webView.url != nil }
+        let others = tabs.filter { $0 !== activeTab && !$0.hibernated && $0.liveWebView?.url != nil }
             .sorted { $0.lastActivatedAt > $1.lastActivatedAt }
         for tab in others.dropFirst(Self.liveTabLimit - 1) { hibernate(tab) }
     }
@@ -186,17 +186,15 @@ final class TabStore {
         SnapshotStore.shared.dropMemoryCache()
     }
 
-    /// 탭의 페이지를 내린다. 웹뷰를 새것으로 바꿔 웹 프로세스까지 놓는다. 뒤로가기 이력은
+    /// 탭의 페이지를 내린다. 웹뷰를 놓아 웹 프로세스까지 내려간다. 뒤로가기 이력은
     /// pendingInteractionState에 남겨 다시 고를 때 그 자리로 돌아온다. 주소창·격자 카드는
     /// lastURL과 디스크 그림을 그대로 쓴다.
     func hibernate(_ tab: Tab) {
-        guard !tab.hibernated, tab.webView.url != nil, !tab.webView.isLoading else { return }
-        tab.pendingInteractionState = tab.webView.interactionState as? Data
+        guard !tab.hibernated, let webView = tab.liveWebView, webView.url != nil, !webView.isLoading else { return }
+        tab.pendingInteractionState = webView.interactionState as? Data
         tab.hibernated = true
         tab.thumbnail = nil
-        tab.replaceWebView(configuration: Self.makeConfiguration())
-        applyRuleLists(to: tab)
-        applyUserScripts(to: tab)
+        tab.unloadWebView()
     }
 
     /// 탭에 얹을 스크립트 목록. 차단 방식이 끄기면 광고를 건드리는 스크립트를 빼고, 나머지 두
@@ -227,8 +225,9 @@ final class TabStore {
         return scripts
     }
 
+    /// 웹뷰가 있는 탭에만 다시 얹는다. 내린 탭은 웹뷰를 만들 때 얹는다.
     func reloadUserScripts() {
-        for tab in tabs {
+        for tab in tabs where tab.liveWebView != nil {
             applyUserScripts(to: tab)
         }
     }
@@ -283,7 +282,7 @@ final class TabStore {
         let lists = await task.value
         guard networkRuleLists == nil else { return }
         networkRuleLists = lists
-        for tab in tabs where tab.appliedBlockingMode == .networkOnly {
+        for tab in tabs where tab.appliedBlockingMode == .networkOnly && tab.liveWebView != nil {
             applyRuleLists(to: tab)
         }
     }
@@ -320,9 +319,27 @@ final class TabStore {
     }
 
     func newTab(id: UUID = UUID()) {
-        let tab = Tab(id: id, configuration: Self.makeConfiguration())
-        userScripts(for: .full).forEach { tab.webView.configuration.userContentController.addUserScript($0) }
-        ruleLists.forEach { tab.webView.configuration.userContentController.add($0) }
+        let tab = makeTab(id: id, loaded: true)
+        tabs.append(tab)
+        activate(tab)
+    }
+
+    /// 탭을 만들고 이동·기록·그림 처리를 잇는다. loaded가 거짓이면 웹뷰 없이 내린 채로 만든다 —
+    /// 고를 때 웹뷰를 만든다.
+    private func makeTab(id: UUID, loaded: Bool) -> Tab {
+        let tab = Tab(id: id, configuration: loaded ? Self.makeConfiguration() : nil,
+                      makeConfiguration: { Self.makeConfiguration() })
+        tab.hibernated = !loaded
+        // 웹뷰를 새로 만들면 그 탭 방식의 규칙 목록·스크립트를 얹는다.
+        tab.onWebViewCreated = { [weak self, weak tab] _ in
+            guard let self, let tab else { return }
+            self.applyRuleLists(to: tab)
+            self.applyUserScripts(to: tab)
+        }
+        if loaded {
+            applyRuleLists(to: tab)
+            applyUserScripts(to: tab)
+        }
         tab.coordinator.onMainFrameNavigation = { [weak self, weak tab] url in
             guard let tab else { return }
             self?.applyBlocking(to: tab, for: url)
@@ -364,8 +381,7 @@ final class TabStore {
             guard let tab else { return }
             self?.openLinkInNewTab(url, from: tab)
         }
-        tabs.append(tab)
-        activate(tab)
+        return tab
     }
 
     /// 링크 롱탭 "새 탭에서 열기". 새 탭으로 전환하고, 방문 기록에는 원래 탭의 마지막
@@ -385,15 +401,15 @@ final class TabStore {
         // 필터 본문이 바뀌었을 수 있다 — 감지 회피 목록은 다음에 필요할 때 다시 컴파일한다.
         networkRuleLists = nil
         networkListsTask = nil
-        for tab in tabs {
+        for tab in tabs where tab.liveWebView != nil {
             applyRuleLists(to: tab)
         }
     }
 
     func close(_ tab: Tab) {
-        // 절전 중인 탭은 웹뷰가 빈 페이지를 물고 있다 — 주소·이력은 저장해 둔 것을 쓴다.
-        let url = tab.hibernated ? tab.lastURL : (tab.webView.url ?? tab.lastURL)
-        let state = tab.pendingInteractionState ?? (tab.webView.interactionState as? Data)
+        // 내린 탭은 웹뷰가 없다 — 주소·이력은 저장해 둔 것을 쓴다.
+        let url = tab.hibernated ? tab.lastURL : (tab.liveWebView?.url ?? tab.lastURL)
+        let state = tab.pendingInteractionState ?? (tab.liveWebView?.interactionState as? Data)
         if let url {
             closedTabs.append(ClosedTab(url: url, state: state, tabID: tab.id,
                                         sticky: tab.sticky, stickyParentID: tab.stickyParentID))
@@ -499,9 +515,9 @@ final class TabStore {
         try? fm.createDirectory(at: stateDirectory, withIntermediateDirectories: true)
         var kept: Set<String> = []
         for tab in tabs {
-            // 복원 뒤 아직 화면에 안 붙은 탭은 웹뷰가 비어 있다 — 읽어 둔 이력을 그대로 다시 쓴다.
+            // 내린 탭은 웹뷰가 없다 — 읽어 둔 이력을 그대로 다시 쓴다.
             let data = tab.pendingInteractionState
-                ?? (tab.webView.url != nil ? tab.webView.interactionState as? Data : nil)
+                ?? (tab.liveWebView?.url != nil ? tab.liveWebView?.interactionState as? Data : nil)
             guard let data else { continue }
             try? data.write(to: stateDirectory.appendingPathComponent(tab.id.uuidString), options: .atomic)
             kept.insert(tab.id.uuidString)
@@ -525,15 +541,18 @@ final class TabStore {
         }
         let urls = (defaults.stringArray(forKey: Self.stateKey) ?? []).compactMap(URL.init(string:))
         let ids = (defaults.stringArray(forKey: Self.idsKey) ?? []).compactMap(UUID.init(uuidString:))
+        let saved = defaults.integer(forKey: Self.activeKey)
+        let activeIndex = urls.indices.contains(saved) ? saved : urls.count - 1
         for (offset, url) in urls.enumerated() {
-            // 옛 저장본에는 ID가 없다 — 짝이 안 맞으면 새 ID로 연다.
-            newTab(id: ids.indices.contains(offset) ? ids[offset] : UUID())
-            activeTab?.lastURL = url
+            // 옛 저장본에는 ID가 없다 — 짝이 안 맞으면 새 ID로 연다. 보는 탭만 웹뷰를 갖고 나머지는
+            // 내린 채로 만든다 — 고를 때 이력째 불러온다.
+            let tab = makeTab(id: ids.indices.contains(offset) ? ids[offset] : UUID(),
+                              loaded: offset == activeIndex)
+            tab.lastURL = url
             // 백그라운드 때 저장해 둔 뒤로가기 이력. activate가 소비한다.
-            if let tab = activeTab {
-                tab.pendingInteractionState =
-                    try? Data(contentsOf: stateDirectory.appendingPathComponent(tab.id.uuidString))
-            }
+            tab.pendingInteractionState =
+                try? Data(contentsOf: stateDirectory.appendingPathComponent(tab.id.uuidString))
+            tabs.append(tab)
         }
         if tabs.isEmpty { newTab() }
         let stickyIDs = Set((defaults.stringArray(forKey: Self.stickyIDsKey) ?? []).compactMap(UUID.init(uuidString:)))
@@ -546,12 +565,8 @@ final class TabStore {
             }
         }
         for tab in tabs { tab.stickyParentID = parents[tab.id] }
-        // newTab()이 매번 activeTab을 덮으므로 루프가 끝난 뒤 저장된 자리로 되돌린다.
-        // 로드는 하지 않는다 — 화면에 붙을 때 ContentView가 activate()로 연다.
-        let index = defaults.integer(forKey: Self.activeKey)
-        activeTab = tabs.indices.contains(index) ? tabs[index] : tabs[tabs.count - 1]
-        // 되살린 탭은 내린 채로 시작한다 — 고를 때 이력째 불러온다. 보는 탭은 activate가 불러온다.
-        for tab in tabs where tab !== activeTab { tab.hibernated = true }
+        // 저장된 자리로 둔다. 로드는 하지 않는다 — 화면에 붙을 때 ContentView가 activate()로 연다.
+        activeTab = tabs.indices.contains(activeIndex) ? tabs[activeIndex] : tabs[tabs.count - 1]
         SnapshotStore.shared.prune(keeping: Set(history.visits.map(\.id)))
     }
 
