@@ -6,7 +6,7 @@ import os
 /// 그 사람 계정에 들어가므로 개발자는 볼 수 없다. 주소·제목은 encryptedValues로 올린다 —
 /// 기기에서 암호화되고, 고급 데이터 보호를 켠 계정에서는 종단간 암호화가 된다.
 ///
-/// 로컬 저장은 그대로 history.json이다. 이 층은 변경분을 올리고 내려받아 원장에 반영만 한다.
+/// 로컬 저장은 그대로 history.jsonl이다. 이 층은 변경분을 올리고 내려받아 원장에 반영만 한다.
 /// 레코드의 시스템 필드는 HistoryStore가 방문별 파일(history-records/)로 들고 있다.
 @MainActor
 final class CloudSync: NSObject {

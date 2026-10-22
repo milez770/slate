@@ -119,22 +119,10 @@ final class TranslationCache {
 /// 번역 원장 파일을 쓰는 배경 일꾼. 덧붙이기와 전체 다시 쓰기 둘뿐이다.
 actor TranslationLogWriter {
     private static let logger = Logger(subsystem: "com.wonseon.slate", category: "translate-log")
-    private static let newline = Data([UInt8(ascii: "\n")])
 
-    /// 쌍들을 파일 끝에 붙인다. 앞 줄이 줄바꿈 없이 끊겨 있으면 먼저 끝맺는다.
     func append(_ pairs: [(String, String)], to url: URL) -> Bool {
         do {
-            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-            if !FileManager.default.fileExists(atPath: url.path) { try Data().write(to: url) }
-            // 마지막 글자를 읽어야 하니 읽기·쓰기 겸용으로 연다.
-            let handle = try FileHandle(forUpdating: url)
-            defer { try? handle.close() }
-            let end = try handle.seekToEnd()
-            if end > 0 {
-                try handle.seek(toOffset: end - 1)
-                if try handle.read(upToCount: 1) != Self.newline { try handle.write(contentsOf: Self.newline) }
-            }
-            try handle.write(contentsOf: Self.lines(pairs))
+            try LineLog.append(Self.lines(pairs), to: url)
             return true
         } catch {
             Self.logger.error("append: \(error.localizedDescription, privacy: .public)")
@@ -142,33 +130,24 @@ actor TranslationLogWriter {
         }
     }
 
-    /// 사전 전체로 파일을 새로 쓴다. 임시 파일에 천 줄씩 쓰고 바꿔 넣는다.
+    /// 사전 전체로 파일을 새로 쓴다. 천 줄씩 만들어 쓴다.
     func rewrite(_ map: [String: String], to url: URL) -> Bool {
-        let temp = url.appendingPathExtension("tmp")
         do {
-            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try Data().write(to: temp)
-            let handle = try FileHandle(forWritingTo: temp)
-            var chunk: [(String, String)] = []
-            chunk.reserveCapacity(1000)
-            for pair in map {
-                chunk.append(pair)
-                if chunk.count == 1000 {
-                    try handle.write(contentsOf: Self.lines(chunk))
-                    chunk.removeAll(keepingCapacity: true)
+            try LineLog.rewrite(url) { handle in
+                var chunk: [(String, String)] = []
+                chunk.reserveCapacity(1000)
+                for pair in map {
+                    chunk.append(pair)
+                    if chunk.count == 1000 {
+                        try handle.write(contentsOf: Self.lines(chunk))
+                        chunk.removeAll(keepingCapacity: true)
+                    }
                 }
-            }
-            if !chunk.isEmpty { try handle.write(contentsOf: Self.lines(chunk)) }
-            try handle.close()
-            if FileManager.default.fileExists(atPath: url.path) {
-                _ = try FileManager.default.replaceItemAt(url, withItemAt: temp)
-            } else {
-                try FileManager.default.moveItem(at: temp, to: url)
+                if !chunk.isEmpty { try handle.write(contentsOf: Self.lines(chunk)) }
             }
             return true
         } catch {
             Self.logger.error("rewrite: \(error.localizedDescription, privacy: .public)")
-            try? FileManager.default.removeItem(at: temp)
             return false
         }
     }
@@ -177,7 +156,7 @@ actor TranslationLogWriter {
         var data = Data()
         for (key, value) in pairs {
             data.append(try JSONSerialization.data(withJSONObject: [key, value]))
-            data.append(newline)
+            data.append(LineLog.newline)
         }
         return data
     }

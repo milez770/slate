@@ -118,9 +118,12 @@ final class Tab: Identifiable {
     /// 다음 로드 한 번은 규칙 목록 없이 간다. 커밋되면 TabStore가 규칙을 다시 걸고 끈다.
     @ObservationIgnored var bypassBlockerForNextLoad = false
 
-    /// 로드 없이 주소가 바뀔 때(SPA의 pushState — didCommit이 안 뜬다) 알린다.
+    /// 로드 없이 주소가 바뀔 때(SPA의 pushState·replaceState — didCommit이 안 뜬다) 알린다.
+    /// 둘째 인자는 뒤로가기 항목이 그대로인가 — replaceState는 항목을 새로 만들지 않고 주소만 고친다.
     /// 로딩 중의 주소 변화는 didCommit이 맡으므로 여기서는 거른다.
-    @ObservationIgnored var onURLChange: (@MainActor (URL) -> Void)?
+    @ObservationIgnored var onURLChange: (@MainActor (URL, Bool) -> Void)?
+    /// 마지막으로 본 뒤로가기 항목. 주소가 바뀌었는데 항목이 같으면 replaceState다.
+    @ObservationIgnored private weak var lastListItem: WKBackForwardListItem?
     /// 페이지 제목이 잡힐 때 알린다. 제목은 로드 완료보다 늦게 온다.
     @ObservationIgnored var onTitleChange: (@MainActor (String, URL) -> Void)?
     /// 페이지 그림을 찍었을 때 알린다. 받는 쪽이 지금 방문에 붙여 디스크에 남긴다.
@@ -157,6 +160,7 @@ final class Tab: Identifiable {
         coordinator.onCommit = { [weak self] url in
             guard let self, !self.hibernated else { return }
             self.lastURL = url
+            self.lastListItem = self.webView.backForwardList.currentItem
             self.canGoBack = self.webView.canGoBack
             self.canGoForward = self.webView.canGoForward
             self.applyStoredRules()
@@ -239,7 +243,11 @@ final class Tab: Identifiable {
                     self.lastURL = url
                     // 로딩 중이면 일반 로드(제공·리다이렉트 주소 포함)라 didCommit이 처리한다.
                     // 로딩이 아닌데 주소가 바뀌었으면 SPA 이동이다.
-                    if !webView.isLoading { self.onURLChange?(url) }
+                    guard !webView.isLoading else { return }
+                    let item = webView.backForwardList.currentItem
+                    let replaced = item != nil && item === self.lastListItem
+                    self.lastListItem = item
+                    self.onURLChange?(url, replaced)
                 }
             },
             webView.observe(\.title, options: [.new]) { [weak self] webView, _ in

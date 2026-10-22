@@ -330,10 +330,12 @@ final class TabStore {
             self?.history.record(url: url, tabID: tab.id)
             self?.saveState()
         }
-        // SPA 이동은 didCommit이 안 뜬다 — 로드 없는 주소 변화로 찍는다.
-        tab.onURLChange = { [weak self, weak tab] url in
+        // SPA 이동은 didCommit이 안 뜬다 — 로드 없는 주소 변화로 찍는다. 주소만 고친 것
+        // (replaceState)은 새 방문이 아니다 — 재생 위치·스크롤을 주소에 계속 적는 사이트가 있다.
+        tab.onURLChange = { [weak self, weak tab] url, replaced in
             guard let tab else { return }
-            self?.history.record(url: url, tabID: tab.id)
+            self?.history.record(url: url, tabID: tab.id, replacing: replaced)
+            guard !replaced else { return }
             // SPA에는 로드 완료 신호가 없다. 새 화면이 그려질 틈을 준 뒤 찍는다.
             Task { @MainActor in
                 try? await Task.sleep(for: .milliseconds(700))

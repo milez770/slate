@@ -23,7 +23,7 @@ struct SettingsView: View {
                 Text("방문 기록이 내 iCloud 계정에 저장돼 기기 사이를 오간다. 주소와 제목은 기기에서 암호화해 올린다. 로그인 상태(쿠키)는 올리지 않는다.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Text("방문 \(store.history.visits.count)개 · history.json \(ByteCountFormatter.string(fromByteCount: Int64(store.history.fileSize), countStyle: .file))")
+                Text("방문 \(store.history.visits.count)개 · history.jsonl \(ByteCountFormatter.string(fromByteCount: Int64(store.history.fileSize), countStyle: .file))")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                 Text("탭 \(store.tabs.count)개(살아 있는 페이지 \(store.liveTabCount)) · 앱이 쓰는 메모리 \(ByteCountFormatter.string(fromByteCount: Int64(processFootprint()), countStyle: .memory)) · 더 쓸 수 있는 메모리 \(ByteCountFormatter.string(fromByteCount: Int64(os_proc_available_memory()), countStyle: .memory))")
