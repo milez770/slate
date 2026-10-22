@@ -53,6 +53,9 @@ struct ContentView: View {
             if let tab = store.activeTab {
                 store.activate(tab)
             }
+            #if DEBUG
+            StressDriver.start(store)
+            #endif
             if let url = pendingURL {
                 pendingURL = nil
                 open(url)
