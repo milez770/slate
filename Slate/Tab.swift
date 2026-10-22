@@ -143,6 +143,9 @@ final class Tab: Identifiable {
 
     /// 웹 프로세스가 죽었다(대개 메모리 부족).
     func webContentTerminated(now: Date = Date()) {
+        #if DEBUG
+        MemoryLog.event("웹 프로세스 종료 \(webView.isHidden ? "숨은 탭" : "보는 탭") \(lastURL?.host ?? "")")
+        #endif
         switch Self.terminationResponse(hidden: webView.isHidden, now: now, lastTermination: lastTermination) {
         case .reloadWhenShown:
             reloadWhenShown = true

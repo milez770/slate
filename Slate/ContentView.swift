@@ -37,6 +37,9 @@ struct ContentView: View {
             ForEach(Translator.sources, id: \.self) { TranslationBridge(source: $0) }
         }
         .task {
+            #if DEBUG
+            MemoryLog.start(store)
+            #endif
             // 세션 쿠키를 첫 페이지 로드 전에 되살린다 — activate()가 로드를 시작하기 전이어야
             // 로그인 풀린 화면이 먼저 뜨지 않는다.
             let cookieStore = WKWebsiteDataStore.default().httpCookieStore

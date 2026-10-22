@@ -144,7 +144,12 @@ final class TabStore {
         memoryWarningObserver = NotificationCenter.default.addObserver(
             forName: UIApplication.didReceiveMemoryWarningNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.relieveMemoryPressure() }
+            MainActor.assumeIsolated {
+                #if DEBUG
+                MemoryLog.event("메모리 부족 알림")
+                #endif
+                self?.relieveMemoryPressure()
+            }
         }
     }
 

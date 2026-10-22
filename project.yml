@@ -30,6 +30,7 @@ targets:
       - target: Slate
     settings:
       base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.wonseon.slate.tests
         GENERATE_INFOPLIST_FILE: YES
   SlateUITests:
     type: bundle.ui-testing
@@ -39,6 +40,7 @@ targets:
       - target: Slate
     settings:
       base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.wonseon.slate.uitests
         GENERATE_INFOPLIST_FILE: YES
 schemes:
   Slate:
