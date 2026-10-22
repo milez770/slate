@@ -202,7 +202,8 @@ final class TabStore {
     private func userScripts(for mode: BlockingMode) -> [WKUserScript] {
         var scripts = [
             UserScripts.script(named: "popup-guard", injectionTime: .atDocumentStart, forMainFrameOnly: false),
-            UserScripts.script(named: "sticky-detour", injectionTime: .atDocumentStart, forMainFrameOnly: true)
+            UserScripts.script(named: "sticky-detour", injectionTime: .atDocumentStart, forMainFrameOnly: true),
+            UserScripts.script(named: "edge-swipe-guard", injectionTime: .atDocumentStart, forMainFrameOnly: true)
         ]
         if mode != .off {
             scripts += [
